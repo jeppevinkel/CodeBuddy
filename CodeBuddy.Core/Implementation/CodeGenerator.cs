@@ -1,4 +1,5 @@
 using System.Text;
+using CodeBuddy.Core.Implementation.CodeValidation;
 using CodeBuddy.Core.Interfaces;
 using CodeBuddy.Core.Models;
 using Microsoft.Extensions.Logging;
@@ -11,10 +12,12 @@ namespace CodeBuddy.Core.Implementation;
 public class CodeGenerator : ICodeGenerator
 {
     private readonly ILogger<CodeGenerator> _logger;
+    private readonly CodeValidatorFactory _validatorFactory;
 
     public CodeGenerator(ILogger<CodeGenerator> logger)
     {
         _logger = logger;
+        _validatorFactory = new CodeValidatorFactory(logger);
     }
 
     public async Task<string> GenerateCodeAsync(Template template, Dictionary<string, object> parameters)
@@ -66,7 +69,7 @@ public class CodeGenerator : ICodeGenerator
         }
     }
 
-    public async Task<bool> ValidateGeneratedCodeAsync(string generatedCode)
+    public async Task<bool> ValidateGeneratedCodeAsync(string generatedCode, string language = "csharp")
     {
         if (string.IsNullOrWhiteSpace(generatedCode))
         {
@@ -74,13 +77,42 @@ public class CodeGenerator : ICodeGenerator
             return false;
         }
 
-        // In a real implementation, this would include:
-        // - Syntax validation for the specific language
-        // - Security checks
-        // - Code style validation
-        // For now, we'll just do basic validation
+        try
+        {
+            if (!_validatorFactory.SupportsLanguage(language))
+            {
+                _logger.LogWarning("Language {Language} is not supported for validation", language);
+                return true; // Return true for unsupported languages to avoid blocking generation
+            }
 
-        return await Task.FromResult(true);
+            var validator = _validatorFactory.GetValidator(language);
+            var options = new ValidationOptions
+            {
+                ValidateSyntax = true,
+                ValidateSecurity = true,
+                ValidateStyle = true,
+                ValidateBestPractices = true,
+                ValidateErrorHandling = true
+            };
+
+            var result = await validator.ValidateAsync(generatedCode, language, options);
+
+            if (!result.IsValid)
+            {
+                foreach (var issue in result.Issues)
+                {
+                    _logger.LogWarning("Validation issue: [{Severity}] {Code} - {Message} at {Location}",
+                        issue.Severity, issue.Code, issue.Message, issue.Location);
+                }
+            }
+
+            return result.IsValid;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during code validation");
+            throw;
+        }
     }
 
     private async Task<string> ProcessTemplateContentAsync(string templateContent, Dictionary<string, object> parameters)
