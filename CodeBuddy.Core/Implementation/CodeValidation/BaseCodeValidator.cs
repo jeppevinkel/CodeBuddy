@@ -40,30 +40,33 @@ public abstract class BaseCodeValidator : ICodeValidator
                 }
             }
 
-            // Get available system resources
+            // Analyze phase dependencies and system resources
+            var phaseAnalysis = await AnalyzeValidationPhasesAsync(options, code);
             var (availableCores, memoryUsage, cpuUsage) = GetSystemResources();
-            var canRunParallel = CanRunParallel(options.ParallelOptions, availableCores, memoryUsage, cpuUsage);
-
-            var validationPhases = new List<(string Name, Func<Task> Task)>();
-
-            if (options.ValidateSecurity)
-                validationPhases.Add(("Security", () => ValidateSecurityAsync(code, result)));
             
-            if (options.ValidateStyle)
-                validationPhases.Add(("Style", () => ValidateStyleAsync(code, result)));
-            
-            if (options.ValidateBestPractices)
-                validationPhases.Add(("BestPractices", () => ValidateBestPracticesAsync(code, result)));
-            
-            if (options.ValidateErrorHandling)
-                validationPhases.Add(("ErrorHandling", () => ValidateErrorHandlingAsync(code, result)));
+            // Determine optimal parallelization strategy
+            var executionStrategy = DetermineExecutionStrategy(
+                phaseAnalysis, 
+                options.ParallelOptions,
+                availableCores,
+                memoryUsage,
+                cpuUsage
+            );
 
-            if (canRunParallel)
+            // Build validation pipeline based on analysis
+            var validationPhases = BuildValidationPipeline(options, code, result);
+
+            // Execute validation phases according to strategy
+            if (executionStrategy.EnableParallel)
             {
-                await ExecuteInParallel(validationPhases, options, result);
+                result.Statistics.Performance.ParallelizationDecisions["Strategy"] = 
+                    $"Parallel execution with {executionStrategy.MaxConcurrentTasks} concurrent tasks";
+                await ExecuteInParallel(validationPhases, executionStrategy, result);
             }
             else
             {
+                result.Statistics.Performance.ParallelizationDecisions["Strategy"] = 
+                    $"Sequential execution due to {executionStrategy.Reason}";
                 foreach (var phase in validationPhases)
                 {
                     await MeasurePhaseAsync(phase.Name, phase.Task);
@@ -197,36 +200,45 @@ public abstract class BaseCodeValidator : ICodeValidator
         DetectBottlenecks(metrics);
     }
 
-    private async Task ExecuteInParallel(List<(string Name, Func<Task> Task)> phases, ValidationOptions options, ValidationResult result)
+    private async Task ExecuteInParallel(
+        List<(string Name, Func<Task> Task)> phases, 
+        ExecutionStrategy strategy,
+        ValidationResult result)
     {
         var parallelTasks = new List<Task>();
-        var maxConcurrent = DetermineMaxConcurrentTasks(options.ParallelOptions);
         var runningTasks = new Dictionary<string, Task>();
+        var phasesByGroup = phases
+            .GroupBy(p => strategy.PhaseGroupings.GetValueOrDefault(p.Name, 0))
+            .OrderBy(g => g.Key);
 
-        foreach (var phase in phases)
+        foreach (var group in phasesByGroup)
         {
-            if (options.ParallelOptions.SequentialPhases.Contains(phase.Name))
+            var groupTasks = new List<Task>();
+
+            foreach (var phase in group)
             {
-                // Run sequential phases immediately
-                await MeasurePhaseAsync(phase.Name, phase.Task);
-                continue;
+                var task = MeasureParallelPhaseAsync(phase.Name, phase.Task);
+                runningTasks[phase.Name] = task;
+                groupTasks.Add(task);
+                
+                result.Statistics.Performance.ParallelizationDecisions[phase.Name] = 
+                    $"Executed in group {group.Key}";
             }
 
-            // Wait if we've reached the maximum concurrent tasks
-            while (maxConcurrent > 0 && runningTasks.Count >= maxConcurrent)
-            {
-                var completedTask = await Task.WhenAny(runningTasks.Values);
-                var completedPhase = runningTasks.First(x => x.Value == completedTask);
-                runningTasks.Remove(completedPhase.Key);
-            }
+            // Execute each group of tasks
+            await Task.WhenAll(groupTasks);
+            parallelTasks.AddRange(groupTasks);
 
-            var task = MeasureParallelPhaseAsync(phase.Name, phase.Task);
-            runningTasks[phase.Name] = task;
-            parallelTasks.Add(task);
+            // Update metrics after each group
+            result.Statistics.Performance.OptimalConcurrentPhases = 
+                Math.Max(result.Statistics.Performance.OptimalConcurrentPhases, 
+                        group.Count());
         }
 
-        // Wait for remaining tasks
-        await Task.WhenAll(parallelTasks);
+        // Record final execution metrics
+        result.Statistics.Performance.AdaptiveParallelizationEnabled = true;
+        result.Statistics.Performance.MaxConcurrentOperations = 
+            strategy.MaxConcurrentTasks;
     }
 
     private (int Cores, double MemoryUsage, double CpuUsage) GetSystemResources()
@@ -256,6 +268,205 @@ public abstract class BaseCodeValidator : ICodeValidator
             return false;
 
         return true;
+    }
+
+    private class ValidationPhaseAnalysis
+    {
+        public Dictionary<string, HashSet<string>> Dependencies { get; set; } = new();
+        public Dictionary<string, double> EstimatedLoad { get; set; } = new();
+        public HashSet<string> ParallelizablePhases { get; set; } = new();
+    }
+
+    private class ExecutionStrategy
+    {
+        public bool EnableParallel { get; set; }
+        public int MaxConcurrentTasks { get; set; }
+        public string Reason { get; set; }
+        public Dictionary<string, int> PhaseGroupings { get; set; } = new();
+    }
+
+    private async Task<ValidationPhaseAnalysis> AnalyzeValidationPhasesAsync(ValidationOptions options, string code)
+    {
+        var analysis = new ValidationPhaseAnalysis();
+        
+        // Define known dependencies
+        analysis.Dependencies["Security"] = new HashSet<string> { "Syntax" };
+        analysis.Dependencies["Style"] = new HashSet<string> { "Syntax" };
+        analysis.Dependencies["BestPractices"] = new HashSet<string> { "Syntax" };
+        analysis.Dependencies["ErrorHandling"] = new HashSet<string> { "Syntax" };
+        analysis.Dependencies["CustomRules"] = new HashSet<string> 
+            { "Syntax", "Security", "Style", "BestPractices", "ErrorHandling" };
+
+        // Estimate load based on code size and complexity
+        var codeSize = code.Length;
+        var complexity = EstimateCodeComplexity(code);
+        
+        analysis.EstimatedLoad["Syntax"] = codeSize * 0.3;
+        analysis.EstimatedLoad["Security"] = codeSize * 0.2 * complexity;
+        analysis.EstimatedLoad["Style"] = codeSize * 0.15;
+        analysis.EstimatedLoad["BestPractices"] = codeSize * 0.2 * complexity;
+        analysis.EstimatedLoad["ErrorHandling"] = codeSize * 0.15 * complexity;
+        analysis.EstimatedLoad["CustomRules"] = codeSize * 0.1;
+
+        // Identify parallelizable phases
+        analysis.ParallelizablePhases = new HashSet<string> 
+            { "Security", "Style", "BestPractices", "ErrorHandling" };
+
+        return analysis;
+    }
+
+    private double EstimateCodeComplexity(string code)
+    {
+        // Simple complexity estimation based on code characteristics
+        var complexity = 1.0;
+        
+        var lines = code.Split('\n').Length;
+        var branchCount = code.Count(c => c == '{');
+        var loopCount = code.Count(c => c == 'for' || c == 'while');
+        
+        complexity += (branchCount / Math.Max(lines, 1)) * 0.5;
+        complexity += (loopCount / Math.Max(lines, 1)) * 0.3;
+        
+        return Math.Min(complexity, 3.0); // Cap at 3x base complexity
+    }
+
+    private ExecutionStrategy DetermineExecutionStrategy(
+        ValidationPhaseAnalysis analysis,
+        ParallelValidationOptions options,
+        int availableCores,
+        double memoryUsage,
+        double cpuUsage)
+    {
+        var strategy = new ExecutionStrategy();
+
+        // Check if parallelization is possible
+        if (!options.UseAdaptiveParallelization || availableCores < options.MinimumCpuCores)
+        {
+            strategy.EnableParallel = false;
+            strategy.Reason = "System requirements not met or adaptive parallelization disabled";
+            return strategy;
+        }
+
+        // Check resource constraints
+        if (cpuUsage > options.MaxCpuUtilization)
+        {
+            strategy.EnableParallel = false;
+            strategy.Reason = "CPU utilization too high";
+            return strategy;
+        }
+
+        if (memoryUsage > options.MaxMemoryUtilization)
+        {
+            strategy.EnableParallel = false;
+            strategy.Reason = "Memory utilization too high";
+            return strategy;
+        }
+
+        // Determine optimal parallelization
+        strategy.EnableParallel = true;
+        strategy.MaxConcurrentTasks = CalculateOptimalConcurrency(
+            analysis, availableCores, options.MaxConcurrentPhases);
+
+        // Group phases based on dependencies and load
+        AssignPhaseGroups(strategy, analysis);
+
+        return strategy;
+    }
+
+    private int CalculateOptimalConcurrency(
+        ValidationPhaseAnalysis analysis,
+        int availableCores,
+        int maxConfiguredPhases)
+    {
+        var parallelizableLoad = analysis.ParallelizablePhases
+            .Sum(phase => analysis.EstimatedLoad[phase]);
+        var totalLoad = analysis.EstimatedLoad.Values.Sum();
+        
+        var optimalThreads = Math.Ceiling(parallelizableLoad / totalLoad * availableCores);
+        var maxThreads = maxConfiguredPhases > 0 ? maxConfiguredPhases : availableCores - 1;
+        
+        return (int)Math.Min(optimalThreads, maxThreads);
+    }
+
+    private void AssignPhaseGroups(ExecutionStrategy strategy, ValidationPhaseAnalysis analysis)
+    {
+        var currentGroup = 0;
+        var assignedPhases = new HashSet<string>();
+
+        // Assign sequential phases to their own groups
+        foreach (var phase in analysis.Dependencies.Keys)
+        {
+            if (!analysis.ParallelizablePhases.Contains(phase))
+            {
+                strategy.PhaseGroupings[phase] = currentGroup++;
+                assignedPhases.Add(phase);
+            }
+        }
+
+        // Group parallel phases by dependencies and load
+        var remainingPhases = analysis.ParallelizablePhases
+            .Where(p => !assignedPhases.Contains(p))
+            .OrderByDescending(p => analysis.EstimatedLoad[p]);
+
+        foreach (var phase in remainingPhases)
+        {
+            if (assignedPhases.Contains(phase)) continue;
+
+            var compatibleGroup = strategy.PhaseGroupings
+                .Where(g => CanAddToGroup(phase, g.Key, analysis, strategy))
+                .OrderBy(g => g.Value)
+                .FirstOrDefault();
+
+            if (compatibleGroup.Key != null)
+            {
+                strategy.PhaseGroupings[phase] = compatibleGroup.Value;
+            }
+            else
+            {
+                strategy.PhaseGroupings[phase] = currentGroup++;
+            }
+            assignedPhases.Add(phase);
+        }
+    }
+
+    private bool CanAddToGroup(
+        string phase,
+        string groupPhase,
+        ValidationPhaseAnalysis analysis,
+        ExecutionStrategy strategy)
+    {
+        // Check dependencies
+        if (analysis.Dependencies[phase].Intersect(analysis.Dependencies[groupPhase]).Any())
+            return false;
+
+        // Check if adding to this group would exceed concurrent task limit
+        var groupCount = strategy.PhaseGroupings.Count(x => x.Value == strategy.PhaseGroupings[groupPhase]);
+        if (strategy.MaxConcurrentTasks > 0 && groupCount >= strategy.MaxConcurrentTasks)
+            return false;
+
+        return true;
+    }
+
+    private List<(string Name, Func<Task> Task)> BuildValidationPipeline(
+        ValidationOptions options,
+        string code,
+        ValidationResult result)
+    {
+        var pipeline = new List<(string Name, Func<Task> Task)>();
+
+        if (options.ValidateSecurity)
+            pipeline.Add(("Security", () => ValidateSecurityAsync(code, result)));
+        
+        if (options.ValidateStyle)
+            pipeline.Add(("Style", () => ValidateStyleAsync(code, result)));
+        
+        if (options.ValidateBestPractices)
+            pipeline.Add(("BestPractices", () => ValidateBestPracticesAsync(code, result)));
+        
+        if (options.ValidateErrorHandling)
+            pipeline.Add(("ErrorHandling", () => ValidateErrorHandlingAsync(code, result)));
+
+        return pipeline;
     }
 
     private int DetermineMaxConcurrentTasks(ParallelValidationOptions options)
