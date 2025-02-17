@@ -11,6 +11,28 @@ public class ValidationOptions
     public bool ValidateErrorHandling { get; set; } = true;
     public Dictionary<string, object> CustomRules { get; set; } = new();
     public PerformanceThresholds PerformanceThresholds { get; set; } = new();
+    public ParallelValidationOptions ParallelOptions { get; set; } = new();
+}
+
+public class ParallelValidationOptions
+{
+    // Maximum number of concurrent validation phases (0 = unlimited)
+    public int MaxConcurrentPhases { get; set; } = 0;
+    
+    // Whether to use adaptive parallelization based on system resources
+    public bool UseAdaptiveParallelization { get; set; } = true;
+    
+    // Minimum CPU cores required for parallel execution
+    public int MinimumCpuCores { get; set; } = 2;
+    
+    // Maximum CPU utilization percentage before reducing parallelization
+    public double MaxCpuUtilization { get; set; } = 80;
+    
+    // Maximum memory utilization percentage before reducing parallelization
+    public double MaxMemoryUtilization { get; set; } = 75;
+    
+    // Phases that must run sequentially (if any)
+    public HashSet<string> SequentialPhases { get; set; } = new() { "Syntax" };
 }
 
 public class PerformanceThresholds

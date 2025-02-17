@@ -40,8 +40,10 @@ public abstract class BaseCodeValidator : ICodeValidator
                 }
             }
 
-            // Parallel validation for independent phases
-            var parallelTasks = new List<Task>();
+            // Get available system resources
+            var (availableCores, memoryUsage, cpuUsage) = GetSystemResources();
+            var canRunParallel = CanRunParallel(options.ParallelOptions, availableCores, memoryUsage, cpuUsage);
+
             var validationPhases = new List<(string Name, Func<Task> Task)>();
 
             if (options.ValidateSecurity)
@@ -56,14 +58,17 @@ public abstract class BaseCodeValidator : ICodeValidator
             if (options.ValidateErrorHandling)
                 validationPhases.Add(("ErrorHandling", () => ValidateErrorHandlingAsync(code, result)));
 
-            // Start parallel validation phases
-            foreach (var phase in validationPhases)
+            if (canRunParallel)
             {
-                parallelTasks.Add(MeasureParallelPhaseAsync(phase.Name, phase.Task));
+                await ExecuteInParallel(validationPhases, options, result);
             }
-
-            // Wait for all parallel validations to complete
-            await Task.WhenAll(parallelTasks);
+            else
+            {
+                foreach (var phase in validationPhases)
+                {
+                    await MeasurePhaseAsync(phase.Name, phase.Task);
+                }
+            }
 
             // Run custom rules last as they might depend on other validation results
             await MeasurePhaseAsync("CustomRules", () => ValidateCustomRulesAsync(code, result, options.CustomRules));
@@ -132,6 +137,31 @@ public abstract class BaseCodeValidator : ICodeValidator
         _phaseStopwatches[phaseName] = stopwatch;
     }
 
+    private void CalculatePhaseOverlap(PerformanceMetrics metrics, ParallelExecutionReport report)
+    {
+        foreach (var phase in report.PhaseTimings)
+        {
+            var otherPhases = report.PhaseTimings
+                .Where(x => x.Key != phase.Key && x.Value.WasParallel)
+                .ToList();
+
+            if (!otherPhases.Any()) continue;
+
+            var phaseSpan = phase.Value.Duration;
+            var overlapTime = otherPhases.Sum(other => 
+            {
+                var overlap = Math.Min(
+                    phase.Value.Duration.TotalMilliseconds,
+                    other.Value.Duration.TotalMilliseconds
+                );
+                return overlap;
+            });
+
+            metrics.PhaseOverlapPercentages[phase.Key] = 
+                (overlapTime / phaseSpan.TotalMilliseconds) * 100;
+        }
+    }
+
     private void CollectPerformanceMetrics(ValidationResult result)
     {
         _totalStopwatch.Stop();
@@ -165,6 +195,82 @@ public abstract class BaseCodeValidator : ICodeValidator
 
         // Detect bottlenecks
         DetectBottlenecks(metrics);
+    }
+
+    private async Task ExecuteInParallel(List<(string Name, Func<Task> Task)> phases, ValidationOptions options, ValidationResult result)
+    {
+        var parallelTasks = new List<Task>();
+        var maxConcurrent = DetermineMaxConcurrentTasks(options.ParallelOptions);
+        var runningTasks = new Dictionary<string, Task>();
+
+        foreach (var phase in phases)
+        {
+            if (options.ParallelOptions.SequentialPhases.Contains(phase.Name))
+            {
+                // Run sequential phases immediately
+                await MeasurePhaseAsync(phase.Name, phase.Task);
+                continue;
+            }
+
+            // Wait if we've reached the maximum concurrent tasks
+            while (maxConcurrent > 0 && runningTasks.Count >= maxConcurrent)
+            {
+                var completedTask = await Task.WhenAny(runningTasks.Values);
+                var completedPhase = runningTasks.First(x => x.Value == completedTask);
+                runningTasks.Remove(completedPhase.Key);
+            }
+
+            var task = MeasureParallelPhaseAsync(phase.Name, phase.Task);
+            runningTasks[phase.Name] = task;
+            parallelTasks.Add(task);
+        }
+
+        // Wait for remaining tasks
+        await Task.WhenAll(parallelTasks);
+    }
+
+    private (int Cores, double MemoryUsage, double CpuUsage) GetSystemResources()
+    {
+        var cores = Environment.ProcessorCount;
+        var process = Process.GetCurrentProcess();
+        var totalMemory = process.WorkingSet64;
+        var systemMemory = new Microsoft.VisualBasic.Devices.ComputerInfo().TotalPhysicalMemory;
+        var memoryUsagePercent = (double)totalMemory / systemMemory * 100;
+        
+        var metrics = _performanceMonitor.GetMetrics();
+        return (cores, memoryUsagePercent, metrics.CpuPercent);
+    }
+
+    private bool CanRunParallel(ParallelValidationOptions options, int availableCores, double memoryUsage, double cpuUsage)
+    {
+        if (!options.UseAdaptiveParallelization)
+            return true;
+
+        if (availableCores < options.MinimumCpuCores)
+            return false;
+
+        if (cpuUsage > options.MaxCpuUtilization)
+            return false;
+
+        if (memoryUsage > options.MaxMemoryUtilization)
+            return false;
+
+        return true;
+    }
+
+    private int DetermineMaxConcurrentTasks(ParallelValidationOptions options)
+    {
+        if (options.MaxConcurrentPhases > 0)
+            return options.MaxConcurrentPhases;
+
+        if (options.UseAdaptiveParallelization)
+        {
+            var (cores, memoryUsage, cpuUsage) = GetSystemResources();
+            var availableCores = cores - 1; // Reserve one core for system operations
+            return Math.Max(1, availableCores);
+        }
+
+        return 0; // Unlimited
     }
 
     private void DetectBottlenecks(PerformanceMetrics metrics)
