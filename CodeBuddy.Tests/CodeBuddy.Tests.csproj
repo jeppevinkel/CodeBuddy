@@ -1,0 +1,23 @@
+&lt;Project Sdk="Microsoft.NET.Sdk"&gt;
+
+  &lt;PropertyGroup&gt;
+    &lt;TargetFramework&gt;net7.0&lt;/TargetFramework&gt;
+    &lt;ImplicitUsings&gt;enable&lt;/ImplicitUsings&gt;
+    &lt;Nullable&gt;enable&lt;/Nullable&gt;
+    &lt;IsPackable&gt;false&lt;/IsPackable&gt;
+  &lt;/PropertyGroup&gt;
+
+  &lt;ItemGroup&gt;
+    &lt;PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.6.0" /&gt;
+    &lt;PackageReference Include="xunit" Version="2.4.2" /&gt;
+    &lt;PackageReference Include="xunit.runner.visualstudio" Version="2.4.5" /&gt;
+    &lt;PackageReference Include="Moq" Version="4.18.4" /&gt;
+    &lt;PackageReference Include="FluentAssertions" Version="6.11.0" /&gt;
+    &lt;PackageReference Include="coverlet.collector" Version="6.0.0" /&gt;
+  &lt;/ItemGroup&gt;
+
+  &lt;ItemGroup&gt;
+    &lt;ProjectReference Include="..\CodeBuddy.Core\CodeBuddy.Core.csproj" /&gt;
+  &lt;/ItemGroup&gt;
+
+&lt;/Project&gt;
