@@ -38,10 +38,11 @@ public interface IFileOperations
     /// </summary>
     /// <param name="directory">The directory to search</param>
     /// <param name="searchPattern">The search pattern (default: *.*)</param>
+    /// <param name="recursive">If true, includes files from subdirectories recursively (default: false)</param>
     /// <param name="progress">Optional progress tracking</param>
     /// <param name="cancellationToken">Optional cancellation token</param>
     /// <returns>Enumerable of file paths</returns>
-    Task<IEnumerable<string>> ListFilesAsync(string directory, string searchPattern = "*.*", IProgress<FileOperationProgress>? progress = null, CancellationToken cancellationToken = default);
+    Task<IEnumerable<string>> ListFilesAsync(string directory, string searchPattern = "*.*", bool recursive = false, IProgress<FileOperationProgress>? progress = null, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Creates a directory and any necessary parent directories asynchronously with progress tracking

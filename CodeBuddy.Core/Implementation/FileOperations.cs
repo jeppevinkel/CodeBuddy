@@ -234,48 +234,142 @@ public class FileOperations : IFileOperations
         }
     }
 
-    public async Task<IEnumerable<string>> ListFilesAsync(string directory, string searchPattern = "*.*", IProgress<FileOperationProgress>? progress = null, CancellationToken cancellationToken = default)
+    public async Task<IEnumerable<string>> ListFilesAsync(string directory, string searchPattern = "*.*", bool recursive = false, IProgress<FileOperationProgress>? progress = null, CancellationToken cancellationToken = default)
     {
         try
         {
-            _logger.LogDebug("Listing files in {Directory} with pattern {Pattern}", directory, searchPattern);
+            _logger.LogDebug("Listing files in {Directory} with pattern {Pattern} (Recursive: {Recursive})", directory, searchPattern, recursive);
             
             if (!Directory.Exists(directory))
             {
                 throw new DirectoryNotFoundException($"Directory not found: {directory}");
             }
 
-            return await Task.Run(() => 
+            return await Task.Run(async () => 
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                
-                // Get all matching files
-                var files = Directory.GetFiles(directory, searchPattern, SearchOption.TopDirectoryOnly);
-                var totalFiles = files.Length;
-                var processed = 0;
+
+                var result = new List<string>();
+                var processedDirs = 0;
+                var totalDirs = 1; // Start with root directory
+                var processedFiles = 0;
+                var totalFiles = 0;
+
+                // First pass: count total items for accurate progress reporting
+                if (recursive)
+                {
+                    totalDirs += Directory.GetDirectories(directory, "*", SearchOption.AllDirectories).Length;
+                    totalFiles = Directory.GetFiles(directory, searchPattern, SearchOption.AllDirectories).Length;
+                }
+                else
+                {
+                    totalFiles = Directory.GetFiles(directory, searchPattern, SearchOption.TopDirectoryOnly).Length;
+                }
 
                 // Report initial progress
                 progress?.Report(new FileOperationProgress(
                     totalFiles,
-                    processed,
+                    processedFiles,
                     $"Scanning directory {Path.GetFileName(directory)}"
                 ));
 
-                var result = new List<string>();
-                foreach (var file in files)
+                async Task ProcessDirectoryAsync(string currentDir, int level)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    result.Add(file);
-                    processed++;
+                    try
+                    {
+                        if (level > 256) // Protect against extremely deep directory structures
+                        {
+                            _logger.LogWarning("Maximum directory depth (256) exceeded at {Path}", currentDir);
+                            return;
+                        }
 
-                    progress?.Report(new FileOperationProgress(
-                        totalFiles,
-                        processed,
-                        $"Processing files in {Path.GetFileName(directory)}"
-                    ));
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                        // Process files in current directory
+                        var files = Directory.GetFiles(currentDir, searchPattern, SearchOption.TopDirectoryOnly);
+                        
+                        // Use parallel processing for file operations when there are many files
+                        if (files.Length > 100)
+                        {
+                            await Parallel.ForEachAsync(files, 
+                                new ParallelOptions 
+                                { 
+                                    MaxDegreeOfParallelism = Environment.ProcessorCount,
+                                    CancellationToken = cancellationToken 
+                                },
+                                async (file, ct) =>
+                                {
+                                    ct.ThrowIfCancellationRequested();
+                                    lock (result)
+                                    {
+                                        result.Add(file);
+                                        processedFiles++;
+                                        progress?.Report(new FileOperationProgress(
+                                            totalFiles,
+                                            processedFiles,
+                                            $"Processing files in {Path.GetFileName(currentDir)}"
+                                        ));
+                                    }
+                                });
+                        }
+                        else
+                        {
+                            foreach (var file in files)
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+                                result.Add(file);
+                                processedFiles++;
+                                progress?.Report(new FileOperationProgress(
+                                    totalFiles,
+                                    processedFiles,
+                                    $"Processing files in {Path.GetFileName(currentDir)}"
+                                ));
+                            }
+                        }
+
+                        processedDirs++;
+
+                        // Recursively process subdirectories if requested
+                        if (recursive)
+                        {
+                            var subdirs = Directory.GetDirectories(currentDir, "*", SearchOption.TopDirectoryOnly);
+                            
+                            // Use parallel processing for subdirectories when there are many of them
+                            if (subdirs.Length > 20)
+                            {
+                                var tasks = subdirs.Select(subdir => ProcessDirectoryAsync(subdir, level + 1));
+                                await Task.WhenAll(tasks);
+                            }
+                            else
+                            {
+                                foreach (var subdir in subdirs)
+                                {
+                                    await ProcessDirectoryAsync(subdir, level + 1);
+                                }
+                            }
+                        }
+                    }
+                    catch (UnauthorizedAccessException ex)
+                    {
+                        _logger.LogWarning(ex, "Access denied to directory {Path}", currentDir);
+                    }
+                    catch (PathTooLongException ex)
+                    {
+                        _logger.LogWarning(ex, "Path too long in directory {Path}", currentDir);
+                    }
+                    catch (DirectoryNotFoundException ex)
+                    {
+                        _logger.LogWarning(ex, "Directory not found (possibly deleted during enumeration): {Path}", currentDir);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogError(ex, "Error processing directory {Path}", currentDir);
+                        throw;
+                    }
                 }
 
-                return result;
+                await ProcessDirectoryAsync(directory, 0);
+                return result.OrderBy(f => f); // Sort results for consistency
             }, cancellationToken);
         }
         catch (OperationCanceledException)
