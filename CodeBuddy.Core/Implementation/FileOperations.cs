@@ -1,6 +1,7 @@
 using CodeBuddy.Core.Interfaces;
 using CodeBuddy.Core.Models;
 using Microsoft.Extensions.Logging;
+using System.Runtime.InteropServices;
 
 namespace CodeBuddy.Core.Implementation;
 
@@ -10,6 +11,63 @@ namespace CodeBuddy.Core.Implementation;
 public class FileOperations : IFileOperations
 {
     private readonly ILogger<FileOperations> _logger;
+
+    /// <summary>
+    /// Gets the available free space on the drive containing the specified path
+    /// </summary>
+    private async Task<long> GetAvailableDiskSpaceAsync(string path, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var root = Path.GetPathRoot(Path.GetFullPath(path));
+                if (string.IsNullOrEmpty(root))
+                {
+                    throw new ArgumentException("Unable to determine drive root", nameof(path));
+                }
+
+                var driveInfo = new DriveInfo(root);
+                return driveInfo.AvailableFreeSpace;
+            }, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error checking available disk space for {Path}", path);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Validates that sufficient disk space is available for the requested operation
+    /// </summary>
+    private async Task ValidateDiskSpaceAsync(string path, long requiredSpace, string operation, IProgress<FileOperationProgress>? progress = null, CancellationToken cancellationToken = default)
+    {
+        progress?.Report(new FileOperationProgress(
+            1, 0,
+            $"Validating disk space for {operation}"
+        ));
+
+        var availableSpace = await GetAvailableDiskSpaceAsync(path, cancellationToken);
+        
+        if (availableSpace < requiredSpace)
+        {
+            throw new InsufficientDiskSpaceException(path, requiredSpace, availableSpace);
+        }
+
+        progress?.Report(new FileOperationProgress(
+            1, 1,
+            $"Disk space validated for {operation}"
+        ));
+
+        _logger.LogDebug("Disk space validated for {Operation}. Required: {Required}, Available: {Available}", 
+            operation, requiredSpace, availableSpace);
+    }
 
     public FileOperations(ILogger<FileOperations> logger)
     {
@@ -72,6 +130,11 @@ public class FileOperations : IFileOperations
         try
         {
             _logger.LogDebug("Writing file to {Path}", path);
+
+            // Calculate total space needed (temp file + backup + final file)
+            var contentBytes = System.Text.Encoding.UTF8.GetByteCount(content);
+            var spaceNeeded = contentBytes * (File.Exists(path) ? 3 : 2); // Temp + Final + Backup (if exists)
+            await ValidateDiskSpaceAsync(path, spaceNeeded, $"writing {Path.GetFileName(path)}", progress, cancellationToken);
             
             // Ensure directory exists
             var directory = Path.GetDirectoryName(path);
@@ -348,6 +411,9 @@ public class FileOperations : IFileOperations
                 return (files.Length + dirs.Length + 1, bytes);
             }, cancellationToken);
 
+            // Validate disk space
+            await ValidateDiskSpaceAsync(destinationPath, totalBytes, $"copying directory {Path.GetFileName(sourcePath)}", progress, cancellationToken);
+
             var processedItems = 0;
             var processedBytes = 0L;
 
@@ -460,6 +526,16 @@ public class FileOperations : IFileOperations
             {
                 _logger.LogInformation(ex, "Atomic move failed, falling back to copy-then-delete");
             }
+
+            // Get total size for space validation before copy-then-delete
+            var totalSize = await Task.Run(() =>
+            {
+                return Directory.GetFiles(sourcePath, "*.*", SearchOption.AllDirectories)
+                    .Sum(f => new FileInfo(f).Length);
+            }, cancellationToken);
+
+            // Validate disk space for copy operation
+            await ValidateDiskSpaceAsync(destinationPath, totalSize, $"moving directory {Path.GetFileName(sourcePath)}", progress, cancellationToken);
 
             // If atomic move fails, fall back to copy-then-delete
             progress?.Report(new FileOperationProgress(1, 0, $"Beginning copy of {Path.GetFileName(sourcePath)}"));
