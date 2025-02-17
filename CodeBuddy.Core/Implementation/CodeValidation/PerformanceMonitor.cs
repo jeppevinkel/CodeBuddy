@@ -3,35 +3,44 @@ using System.Diagnostics;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation;
 
+using System.Threading.Tasks;
+using CodeBuddy.Core.Implementation.CodeValidation.PerformanceTesting;
+using CodeBuddy.Core.Models;
+
 internal class PerformanceMonitor
 {
-    private Process _currentProcess;
-    private PerformanceCounter _cpuCounter;
-    private long _initialMemory;
+    private readonly PerformanceTestMetricsCollector _metricsCollector;
+    private bool _isCollecting;
+
+    public PerformanceMonitor()
+    {
+        _metricsCollector = new PerformanceTestMetricsCollector();
+    }
 
     public void Start()
     {
-        _currentProcess = Process.GetCurrentProcess();
-        _initialMemory = _currentProcess.WorkingSet64;
-        
-        try
-        {
-            _cpuCounter = new PerformanceCounter("Process", "% Processor Time", _currentProcess.ProcessName);
-        }
-        catch (Exception)
-        {
-            // Performance counters might not be available in all environments
-            _cpuCounter = null;
-        }
+        _isCollecting = true;
+        _metricsCollector.StartCollection();
     }
 
-    public (long PeakMemoryBytes, double CpuPercent, int ThreadCount, int HandleCount) GetMetrics()
+    public async Task<(long PeakMemoryBytes, double CpuPercent, int ThreadCount, int HandleCount)> GetMetrics()
     {
-        var peakMemory = _currentProcess.PeakWorkingSet64;
-        var cpuPercent = _cpuCounter?.NextValue() ?? 0;
-        var threadCount = _currentProcess.Threads.Count;
-        var handleCount = _currentProcess.HandleCount;
+        if (!_isCollecting)
+        {
+            return (0, 0, 0, 0);
+        }
 
-        return (peakMemory, cpuPercent, threadCount, handleCount);
+        var metrics = await _metricsCollector.CollectMetrics();
+        return (
+            metrics.PeakMemoryUsageBytes,
+            metrics.CpuUtilizationPercent,
+            metrics.ThreadCount,
+            metrics.HandleCount
+        );
+    }
+
+    public async Task<PerformanceMetrics> GetDetailedMetrics()
+    {
+        return _isCollecting ? await _metricsCollector.CollectMetrics() : new PerformanceMetrics();
     }
 }
