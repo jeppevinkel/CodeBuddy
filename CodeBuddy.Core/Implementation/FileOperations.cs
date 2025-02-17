@@ -226,4 +226,303 @@ public class FileOperations : IFileOperations
             throw;
         }
     }
+
+    public async Task CreateDirectoryAsync(string path, IProgress<FileOperationProgress>? progress = null, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            _logger.LogDebug("Creating directory at {Path}", path);
+
+            await Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (Directory.Exists(path))
+                {
+                    _logger.LogInformation("Directory already exists at {Path}", path);
+                    progress?.Report(new FileOperationProgress(1, 1, $"Directory already exists: {Path.GetFileName(path)}"));
+                    return;
+                }
+
+                progress?.Report(new FileOperationProgress(1, 0, $"Creating directory: {Path.GetFileName(path)}"));
+                Directory.CreateDirectory(path);
+                progress?.Report(new FileOperationProgress(1, 1, $"Created directory: {Path.GetFileName(path)}"));
+            }, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("Directory creation cancelled for {Path}", path);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error creating directory at {Path}", path);
+            throw;
+        }
+    }
+
+    public async Task DeleteDirectoryAsync(string path, IProgress<FileOperationProgress>? progress = null, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            _logger.LogDebug("Deleting directory at {Path}", path);
+
+            if (!Directory.Exists(path))
+            {
+                _logger.LogInformation("Directory does not exist at {Path}", path);
+                progress?.Report(new FileOperationProgress(1, 1, $"Directory does not exist: {Path.GetFileName(path)}"));
+                return;
+            }
+
+            // Count total items for progress tracking
+            var totalItems = await Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return Directory.GetFiles(path, "*.*", SearchOption.AllDirectories).Length +
+                       Directory.GetDirectories(path, "*", SearchOption.AllDirectories).Length + 1;
+            }, cancellationToken);
+
+            var processed = 0;
+            progress?.Report(new FileOperationProgress(totalItems, processed, $"Beginning deletion of {Path.GetFileName(path)}"));
+
+            // Delete files first
+            var files = await Task.Run(() => Directory.GetFiles(path, "*.*", SearchOption.AllDirectories), cancellationToken);
+            foreach (var file in files)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await Task.Run(() => File.Delete(file), cancellationToken);
+                processed++;
+                progress?.Report(new FileOperationProgress(totalItems, processed, $"Deleted file: {Path.GetFileName(file)}"));
+            }
+
+            // Delete subdirectories
+            var directories = await Task.Run(() => 
+                Directory.GetDirectories(path, "*", SearchOption.AllDirectories)
+                    .OrderByDescending(d => d.Length) // Delete deepest directories first
+                    .ToList(), 
+                cancellationToken);
+
+            foreach (var dir in directories)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await Task.Run(() => Directory.Delete(dir, false), cancellationToken);
+                processed++;
+                progress?.Report(new FileOperationProgress(totalItems, processed, $"Deleted directory: {Path.GetFileName(dir)}"));
+            }
+
+            // Delete root directory
+            await Task.Run(() => Directory.Delete(path, false), cancellationToken);
+            processed++;
+            progress?.Report(new FileOperationProgress(totalItems, processed, $"Deleted root directory: {Path.GetFileName(path)}"));
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("Directory deletion cancelled for {Path}", path);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error deleting directory at {Path}", path);
+            throw;
+        }
+    }
+
+    public async Task CopyDirectoryAsync(string sourcePath, string destinationPath, IProgress<FileOperationProgress>? progress = null, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            _logger.LogDebug("Copying directory from {SourcePath} to {DestinationPath}", sourcePath, destinationPath);
+
+            if (!Directory.Exists(sourcePath))
+            {
+                throw new DirectoryNotFoundException($"Source directory not found: {sourcePath}");
+            }
+
+            // Count total items and calculate total bytes for progress tracking
+            var (totalItems, totalBytes) = await Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var files = Directory.GetFiles(sourcePath, "*.*", SearchOption.AllDirectories);
+                var dirs = Directory.GetDirectories(sourcePath, "*", SearchOption.AllDirectories);
+                var bytes = files.Sum(f => new FileInfo(f).Length);
+                return (files.Length + dirs.Length + 1, bytes);
+            }, cancellationToken);
+
+            var processedItems = 0;
+            var processedBytes = 0L;
+
+            // Create destination directory
+            if (!Directory.Exists(destinationPath))
+            {
+                await Task.Run(() => Directory.CreateDirectory(destinationPath), cancellationToken);
+                processedItems++;
+                progress?.Report(new FileOperationProgress(totalBytes, processedBytes, $"Created directory: {Path.GetFileName(destinationPath)}"));
+            }
+
+            // Copy subdirectories
+            var directories = await Task.Run(() => Directory.GetDirectories(sourcePath, "*", SearchOption.AllDirectories), cancellationToken);
+            foreach (var dir in directories)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var newDir = dir.Replace(sourcePath, destinationPath);
+                await Task.Run(() => Directory.CreateDirectory(newDir), cancellationToken);
+                processedItems++;
+                progress?.Report(new FileOperationProgress(totalBytes, processedBytes, $"Created directory: {Path.GetFileName(newDir)}"));
+            }
+
+            // Copy files
+            var files = await Task.Run(() => Directory.GetFiles(sourcePath, "*.*", SearchOption.AllDirectories), cancellationToken);
+            foreach (var file in files)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var newFile = file.Replace(sourcePath, destinationPath);
+                
+                using var sourceStream = new FileStream(file, FileMode.Open, FileAccess.Read);
+                using var destStream = new FileStream(newFile, FileMode.Create, FileAccess.Write);
+                
+                var buffer = new byte[81920];
+                int read;
+                
+                while ((read = await sourceStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    await destStream.WriteAsync(buffer, 0, read, cancellationToken);
+                    processedBytes += read;
+                    progress?.Report(new FileOperationProgress(totalBytes, processedBytes, $"Copying file: {Path.GetFileName(file)}"));
+                }
+                
+                processedItems++;
+            }
+
+            progress?.Report(new FileOperationProgress(totalBytes, totalBytes, $"Completed copying {Path.GetFileName(sourcePath)}"));
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("Directory copy cancelled from {SourcePath} to {DestinationPath}", sourcePath, destinationPath);
+            if (Directory.Exists(destinationPath))
+            {
+                try
+                {
+                    await DeleteDirectoryAsync(destinationPath, null, CancellationToken.None);
+                }
+                catch (Exception cleanupEx)
+                {
+                    _logger.LogWarning(cleanupEx, "Error cleaning up destination directory after cancellation");
+                }
+            }
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error copying directory from {SourcePath} to {DestinationPath}", sourcePath, destinationPath);
+            if (Directory.Exists(destinationPath))
+            {
+                try
+                {
+                    await DeleteDirectoryAsync(destinationPath, null, CancellationToken.None);
+                }
+                catch (Exception cleanupEx)
+                {
+                    _logger.LogWarning(cleanupEx, "Error cleaning up destination directory after error");
+                }
+            }
+            throw;
+        }
+    }
+
+    public async Task MoveDirectoryAsync(string sourcePath, string destinationPath, IProgress<FileOperationProgress>? progress = null, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            _logger.LogDebug("Moving directory from {SourcePath} to {DestinationPath}", sourcePath, destinationPath);
+
+            if (!Directory.Exists(sourcePath))
+            {
+                throw new DirectoryNotFoundException($"Source directory not found: {sourcePath}");
+            }
+
+            if (Directory.Exists(destinationPath))
+            {
+                throw new IOException($"Destination directory already exists: {destinationPath}");
+            }
+
+            // First try an atomic move operation
+            try
+            {
+                await Task.Run(() =>
+                {
+                    Directory.Move(sourcePath, destinationPath);
+                    progress?.Report(new FileOperationProgress(1, 1, $"Moved directory: {Path.GetFileName(sourcePath)}"));
+                }, cancellationToken);
+                return;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogInformation(ex, "Atomic move failed, falling back to copy-then-delete");
+            }
+
+            // If atomic move fails, fall back to copy-then-delete
+            progress?.Report(new FileOperationProgress(1, 0, $"Beginning copy of {Path.GetFileName(sourcePath)}"));
+            
+            // Copy all contents
+            await CopyDirectoryAsync(sourcePath, destinationPath, progress, cancellationToken);
+
+            // Verify the copy was successful by comparing file counts and sizes
+            var sourceInfo = await Task.Run(() =>
+            {
+                var files = Directory.GetFiles(sourcePath, "*.*", SearchOption.AllDirectories);
+                return (Count: files.Length, Size: files.Sum(f => new FileInfo(f).Length));
+            }, cancellationToken);
+
+            var destInfo = await Task.Run(() =>
+            {
+                var files = Directory.GetFiles(destinationPath, "*.*", SearchOption.AllDirectories);
+                return (Count: files.Length, Size: files.Sum(f => new FileInfo(f).Length));
+            }, cancellationToken);
+
+            if (sourceInfo != destInfo)
+            {
+                throw new IOException("Copy verification failed - size or count mismatch");
+            }
+
+            // Delete the source
+            progress?.Report(new FileOperationProgress(1, 0, $"Removing source directory: {Path.GetFileName(sourcePath)}"));
+            await DeleteDirectoryAsync(sourcePath, null, cancellationToken);
+            progress?.Report(new FileOperationProgress(1, 1, $"Completed moving {Path.GetFileName(sourcePath)}"));
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("Directory move cancelled from {SourcePath} to {DestinationPath}", sourcePath, destinationPath);
+            // Try to cleanup the destination if it was created
+            if (Directory.Exists(destinationPath))
+            {
+                try
+                {
+                    await DeleteDirectoryAsync(destinationPath, null, CancellationToken.None);
+                }
+                catch (Exception cleanupEx)
+                {
+                    _logger.LogWarning(cleanupEx, "Error cleaning up destination directory after cancellation");
+                }
+            }
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error moving directory from {SourcePath} to {DestinationPath}", sourcePath, destinationPath);
+            // Try to cleanup the destination if it was created
+            if (Directory.Exists(destinationPath))
+            {
+                try
+                {
+                    await DeleteDirectoryAsync(destinationPath, null, CancellationToken.None);
+                }
+                catch (Exception cleanupEx)
+                {
+                    _logger.LogWarning(cleanupEx, "Error cleaning up destination directory after error");
+                }
+            }
+            throw;
+        }
+    }
 }

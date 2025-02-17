@@ -42,4 +42,38 @@ public interface IFileOperations
     /// <param name="cancellationToken">Optional cancellation token</param>
     /// <returns>Enumerable of file paths</returns>
     Task<IEnumerable<string>> ListFilesAsync(string directory, string searchPattern = "*.*", IProgress<FileOperationProgress>? progress = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Creates a directory and any necessary parent directories asynchronously with progress tracking
+    /// </summary>
+    /// <param name="path">The path of the directory to create</param>
+    /// <param name="progress">Optional progress tracking</param>
+    /// <param name="cancellationToken">Optional cancellation token</param>
+    Task CreateDirectoryAsync(string path, IProgress<FileOperationProgress>? progress = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Deletes a directory and all its contents asynchronously with progress tracking
+    /// </summary>
+    /// <param name="path">The path of the directory to delete</param>
+    /// <param name="progress">Optional progress tracking</param>
+    /// <param name="cancellationToken">Optional cancellation token</param>
+    Task DeleteDirectoryAsync(string path, IProgress<FileOperationProgress>? progress = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Copies a directory and all its contents to a new location asynchronously with progress tracking
+    /// </summary>
+    /// <param name="sourcePath">The source directory path</param>
+    /// <param name="destinationPath">The destination directory path</param>
+    /// <param name="progress">Optional progress tracking</param>
+    /// <param name="cancellationToken">Optional cancellation token</param>
+    Task CopyDirectoryAsync(string sourcePath, string destinationPath, IProgress<FileOperationProgress>? progress = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Moves a directory and all its contents to a new location asynchronously with progress tracking
+    /// </summary>
+    /// <param name="sourcePath">The source directory path</param>
+    /// <param name="destinationPath">The destination directory path</param>
+    /// <param name="progress">Optional progress tracking</param>
+    /// <param name="cancellationToken">Optional cancellation token</param>
+    Task MoveDirectoryAsync(string sourcePath, string destinationPath, IProgress<FileOperationProgress>? progress = null, CancellationToken cancellationToken = default);
 }
