@@ -35,4 +35,7 @@ public class ValidationStatistics
     public int BestPracticeIssues { get; set; }
     public double CodeCoveragePercentage { get; set; }
     public int CyclomaticComplexity { get; set; }
+    
+    // Performance metrics
+    public PerformanceMetrics Performance { get; set; } = new();
 }
