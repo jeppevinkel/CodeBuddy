@@ -11,6 +11,15 @@ public class PerformanceMetrics
     public double CpuUtilizationPercent { get; set; }
     public Dictionary<string, double> ResourceUtilization { get; set; } = new();
     public List<PerformanceBottleneck> Bottlenecks { get; set; } = new();
+    
+    // Parallel execution metrics
+    public Dictionary<string, bool> ParallelExecutedPhases { get; set; } = new();
+    public double ParallelEfficiencyPercent { get; set; }
+    public int ConcurrentOperationsCount { get; set; }
+    public Dictionary<string, double> PhaseOverlapPercentages { get; set; } = new();
+    public double ThreadPoolUtilizationPercent { get; set; }
+    public TimeSpan SequentialExecutionTime { get; set; }
+    public TimeSpan ParallelExecutionTime { get; set; }
 }
 
 public class PerformanceBottleneck

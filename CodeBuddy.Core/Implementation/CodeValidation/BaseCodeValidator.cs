@@ -29,31 +29,43 @@ public abstract class BaseCodeValidator : ICodeValidator
 
         try
         {
+            // Sequential validation for syntax as it's a prerequisite
             if (options.ValidateSyntax)
             {
                 await MeasurePhaseAsync("Syntax", () => ValidateSyntaxAsync(code, result));
+                if (result.Issues.Any(i => i.Severity == ValidationSeverity.Error))
+                {
+                    result.IsValid = false;
+                    return result;
+                }
             }
+
+            // Parallel validation for independent phases
+            var parallelTasks = new List<Task>();
+            var validationPhases = new List<(string Name, Func<Task> Task)>();
 
             if (options.ValidateSecurity)
-            {
-                await MeasurePhaseAsync("Security", () => ValidateSecurityAsync(code, result));
-            }
-
+                validationPhases.Add(("Security", () => ValidateSecurityAsync(code, result)));
+            
             if (options.ValidateStyle)
-            {
-                await MeasurePhaseAsync("Style", () => ValidateStyleAsync(code, result));
-            }
-
+                validationPhases.Add(("Style", () => ValidateStyleAsync(code, result)));
+            
             if (options.ValidateBestPractices)
-            {
-                await MeasurePhaseAsync("BestPractices", () => ValidateBestPracticesAsync(code, result));
-            }
-
+                validationPhases.Add(("BestPractices", () => ValidateBestPracticesAsync(code, result)));
+            
             if (options.ValidateErrorHandling)
+                validationPhases.Add(("ErrorHandling", () => ValidateErrorHandlingAsync(code, result)));
+
+            // Start parallel validation phases
+            foreach (var phase in validationPhases)
             {
-                await MeasurePhaseAsync("ErrorHandling", () => ValidateErrorHandlingAsync(code, result));
+                parallelTasks.Add(MeasureParallelPhaseAsync(phase.Name, phase.Task));
             }
 
+            // Wait for all parallel validations to complete
+            await Task.WhenAll(parallelTasks);
+
+            // Run custom rules last as they might depend on other validation results
             await MeasurePhaseAsync("CustomRules", () => ValidateCustomRulesAsync(code, result, options.CustomRules));
 
             // Calculate statistics and performance metrics
@@ -102,8 +114,21 @@ public abstract class BaseCodeValidator : ICodeValidator
     {
         var stopwatch = new Stopwatch();
         stopwatch.Start();
+        _performanceMonitor.Start(phaseName);
         await phase();
         stopwatch.Stop();
+        _performanceMonitor.End(phaseName);
+        _phaseStopwatches[phaseName] = stopwatch;
+    }
+
+    private async Task MeasureParallelPhaseAsync(string phaseName, Func<Task> phase)
+    {
+        var stopwatch = new Stopwatch();
+        stopwatch.Start();
+        _performanceMonitor.Start(phaseName);
+        await Task.Run(phase);
+        stopwatch.Stop();
+        _performanceMonitor.End(phaseName);
         _phaseStopwatches[phaseName] = stopwatch;
     }
 
@@ -121,12 +146,22 @@ public abstract class BaseCodeValidator : ICodeValidator
         // Overall metrics
         metrics.AverageValidationTimeMs = _totalStopwatch.Elapsed.TotalMilliseconds;
         
-        // Resource utilization
+        // Resource utilization and parallel execution metrics
         var resourceMetrics = _performanceMonitor.GetMetrics();
         metrics.PeakMemoryUsageBytes = resourceMetrics.PeakMemoryBytes;
         metrics.CpuUtilizationPercent = resourceMetrics.CpuPercent;
         metrics.ResourceUtilization["ThreadCount"] = resourceMetrics.ThreadCount;
         metrics.ResourceUtilization["HandleCount"] = resourceMetrics.HandleCount;
+        
+        // Parallel execution metrics
+        metrics.ConcurrentOperationsCount = resourceMetrics.ConcurrentOps;
+        metrics.ThreadPoolUtilizationPercent = resourceMetrics.ThreadPoolUtilization;
+        metrics.ParallelEfficiencyPercent = _performanceMonitor.CalculateParallelEfficiency();
+        
+        // Calculate sequential vs parallel execution time
+        var sequentialTime = metrics.PhaseTimings.Values.Sum(t => t.TotalMilliseconds);
+        metrics.SequentialExecutionTime = TimeSpan.FromMilliseconds(sequentialTime);
+        metrics.ParallelExecutionTime = _totalStopwatch.Elapsed;
 
         // Detect bottlenecks
         DetectBottlenecks(metrics);
