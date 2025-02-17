@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.Json.Nodes;
 using CodeBuddy.Core.Interfaces;
 using Microsoft.Extensions.Logging;
 
@@ -13,6 +14,8 @@ public class PluginManager : IPluginManager
     private readonly ILogger _pluginLogger;
     private readonly Dictionary<string, IPlugin> _plugins = new();
     private readonly HashSet<string> _enabledPlugins = new();
+    private readonly Dictionary<string, JsonObject> _pluginConfigs = new();
+    private readonly Dictionary<string, JsonObject> _pluginStates = new();
 
     public PluginManager(ILogger<PluginManager> logger, ILoggerFactory loggerFactory)
     {
@@ -33,8 +36,9 @@ public class PluginManager : IPluginManager
             }
 
             var pluginFiles = Directory.GetFiles(directory, "*.dll");
-            var loadedPlugins = new List<IPlugin>();
+            var discoveredPlugins = new List<IPlugin>();
 
+            // First pass: Discover all plugins
             foreach (var pluginFile in pluginFiles)
             {
                 try
@@ -46,18 +50,73 @@ public class PluginManager : IPluginManager
                     foreach (var pluginType in pluginTypes)
                     {
                         var plugin = (IPlugin)Activator.CreateInstance(pluginType)!;
-                        await plugin.InitializeAsync(_pluginLogger);
-                        
                         _plugins[plugin.Id] = plugin;
-                        loadedPlugins.Add(plugin);
+                        discoveredPlugins.Add(plugin);
                         
-                        _logger.LogInformation("Loaded plugin: {Id} ({Name} v{Version})", 
+                        _logger.LogInformation("Discovered plugin: {Id} ({Name} v{Version})", 
                             plugin.Id, plugin.Name, plugin.Version);
                     }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Error loading plugin from {File}", pluginFile);
+                    _logger.LogError(ex, "Error discovering plugin from {File}", pluginFile);
+                }
+            }
+
+            // Second pass: Validate dependencies and initialize in correct order
+            var loadedPlugins = new List<IPlugin>();
+            var remainingPlugins = new HashSet<IPlugin>(discoveredPlugins);
+            var currentIteration = 0;
+            var maxIterations = discoveredPlugins.Count;
+
+            while (remainingPlugins.Count > 0 && currentIteration < maxIterations)
+            {
+                currentIteration++;
+                var pluginsToLoad = remainingPlugins
+                    .Where(p => p.ValidateDependencies(loadedPlugins))
+                    .ToList();
+
+                if (!pluginsToLoad.Any())
+                {
+                    _logger.LogError("Circular or unsatisfiable dependencies detected");
+                    break;
+                }
+
+                foreach (var plugin in pluginsToLoad)
+                {
+                    try
+                    {
+                        // Load configuration if exists
+                        if (!_pluginConfigs.TryGetValue(plugin.Id, out var config))
+                        {
+                            config = plugin.Configuration.Defaults;
+                            _pluginConfigs[plugin.Id] = config;
+                        }
+
+                        // Load state if exists
+                        if (!_pluginStates.TryGetValue(plugin.Id, out var state))
+                        {
+                            state = new JsonObject();
+                            _pluginStates[plugin.Id] = state;
+                        }
+
+                        var context = new JsonObject
+                        {
+                            ["config"] = config,
+                            ["state"] = state
+                        };
+
+                        await plugin.InitializeAsync(_pluginLogger, context);
+                        loadedPlugins.Add(plugin);
+                        remainingPlugins.Remove(plugin);
+                        
+                        _logger.LogInformation("Initialized plugin: {Id}", plugin.Id);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error initializing plugin {Id}", plugin.Id);
+                        remainingPlugins.Remove(plugin);
+                    }
                 }
             }
 
@@ -86,7 +145,21 @@ public class PluginManager : IPluginManager
                 return true;
             }
 
-            await plugin.InitializeAsync(_pluginLogger);
+            // Check dependencies
+            if (!plugin.ValidateDependencies(GetEnabledPlugins()))
+            {
+                _logger.LogError("Cannot enable plugin {Id}: dependencies not satisfied", pluginId);
+                return false;
+            }
+
+            // Load configuration and state
+            var context = new JsonObject
+            {
+                ["config"] = _pluginConfigs.GetValueOrDefault(pluginId, plugin.Configuration.Defaults),
+                ["state"] = _pluginStates.GetValueOrDefault(pluginId, new JsonObject())
+            };
+
+            await plugin.InitializeAsync(_pluginLogger, context);
             _enabledPlugins.Add(pluginId);
             
             _logger.LogInformation("Enabled plugin: {Id}", pluginId);
@@ -114,6 +187,21 @@ public class PluginManager : IPluginManager
                 _logger.LogInformation("Plugin already disabled: {Id}", pluginId);
                 return true;
             }
+
+            // Check if other enabled plugins depend on this one
+            var dependentPlugins = GetEnabledPlugins()
+                .Where(p => p.Id != pluginId && p.Dependencies.Any(d => d.PluginId == pluginId && !d.IsOptional))
+                .ToList();
+
+            if (dependentPlugins.Any())
+            {
+                var dependentIds = string.Join(", ", dependentPlugins.Select(p => p.Id));
+                _logger.LogError("Cannot disable plugin {Id}: required by {DependentIds}", pluginId, dependentIds);
+                return false;
+            }
+
+            // Save state before shutdown
+            _pluginStates[pluginId] = plugin.State.State;
 
             await plugin.ShutdownAsync();
             _enabledPlugins.Remove(pluginId);
