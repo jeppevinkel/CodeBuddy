@@ -15,6 +15,7 @@ public class ValidationPipeline
     private readonly ValidationResilienceConfig _config;
     private readonly IMetricsAggregator _metricsAggregator;
     private readonly IResourceAlertManager _alertManager;
+    private readonly IResourceAnalytics _resourceAnalytics;
     
     // Resource throttling state
     private readonly SemaphoreSlim _validationThrottle;
@@ -27,7 +28,8 @@ public class ValidationPipeline
         ILogger<ValidationPipeline> logger,
         ValidationResilienceConfig config,
         IMetricsAggregator metricsAggregator,
-        IResourceAlertManager alertManager)
+        IResourceAlertManager alertManager,
+        IResourceAnalytics resourceAnalytics)
     {
         _logger = logger;
         _middleware = new List<IValidationMiddleware>();
@@ -36,6 +38,7 @@ public class ValidationPipeline
         _config = config;
         _metricsAggregator = metricsAggregator;
         _alertManager = alertManager;
+        _resourceAnalytics = resourceAnalytics;
         
         // Initialize resource throttling
         _validationThrottle = new SemaphoreSlim(config.MaxConcurrentValidations);
@@ -522,6 +525,30 @@ public class ValidationPipeline
             [ResourceMetricType.Memory] = metrics.MemoryUsageMB,
             [ResourceMetricType.DiskIO] = metrics.DiskIoMBPS
         }, "ValidationPipeline");
+
+        // Store metrics in analytics system
+        await _resourceAnalytics.StoreResourceUsageDataAsync(new ResourceUsageData
+        {
+            PipelineId = "ValidationPipeline",
+            ValidatorType = "System",
+            CpuUsagePercentage = metrics.CpuUsagePercent,
+            MemoryUsageMB = metrics.MemoryUsageMB,
+            DiskIOBytesPerSecond = metrics.DiskIoMBPS * 1024 * 1024, // Convert from MB/s to B/s
+            Timestamp = DateTime.UtcNow
+        });
+
+        // Analyze for potential bottlenecks
+        var bottlenecks = await _resourceAnalytics.IdentifyBottlenecksAsync();
+        foreach (var bottleneck in bottlenecks)
+        {
+            await _alertManager.RaiseResourceAlert(new ResourceAlert
+            {
+                ResourceType = bottleneck.ResourceType,
+                Severity = AlertSeverity.Warning,
+                Message = $"Potential bottleneck detected: {bottleneck.Impact}",
+                RecommendedAction = bottleneck.RecommendedAction
+            });
+        }
     }
 
     private double GetCpuUsage()
