@@ -90,6 +90,7 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     private readonly PerformanceMonitor _performanceMonitor = new();
     private readonly List<string> _temporaryFiles = new();
     private readonly ResourceUsageTracker _resourceTracker;
+    private readonly AsyncResourceTracker _asyncTracker;
     private readonly ObjectPool<byte[]> _bufferPool;
     private readonly ConcurrentQueue<IDisposable> _disposables = new();
     private readonly SemaphoreSlim _cleanupLock = new(1, 1);
@@ -112,6 +113,7 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     {
         _logger = logger;
         _resourceTracker = new ResourceUsageTracker();
+        _asyncTracker = new AsyncResourceTracker(logger);
         _bufferPool = ObjectPool.Create<byte[]>();
         _progress = new FileOperationProgress();
         _validationQueue = new BlockingCollection<ValidationTask>(MaxQueueSize);
@@ -170,7 +172,10 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     {
         try
         {
-            var result = await ValidateInternalAsync(task.Code, task.Options, task.CancellationToken);
+            var result = await _asyncTracker.TrackOperationAsync(
+                async ct => await ValidateInternalAsync(task.Code, task.Options, ct),
+                $"Validation_{task.Code.GetHashCode()}",
+                task.CancellationToken);
             task.CompletionSource.TrySetResult(result);
         }
         catch (Exception ex)
@@ -519,6 +524,9 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
             
             await _cleanupLock.WaitAsync().ConfigureAwait(false);
             
+            // Cleanup async operations
+            await _asyncTracker.DisposeAsync().ConfigureAwait(false);
+            
             // Dispose all tracked disposables
             while (_disposables.TryDequeue(out var disposable))
             {
@@ -801,6 +809,7 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
         // Track validation queue metrics
         metrics.ResourceUtilization["QueueLength"] = _validationQueue.Count;
         metrics.ResourceUtilization["QueueCapacityPercent"] = (_validationQueue.Count / (double)MaxQueueSize) * 100;
+        metrics.ResourceUtilization["ActiveAsyncOperations"] = _asyncTracker.CurrentOperationCount;
 
         // Identify phases that took more than 25% of total time
         var totalTime = metrics.PhaseTimings.Values.Sum(t => t.TotalMilliseconds);
