@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using CodeBuddy.Core.Models.TestCoverage;
 
 namespace CodeBuddy.Core.Models;
 
@@ -15,6 +17,22 @@ public class ValidationResult
     public List<MiddlewareFailure> FailedMiddleware { get; set; } = new();
     public List<string> SkippedMiddleware { get; set; } = new();
     public RecoveryMetrics RecoveryStats { get; set; } = new();
+    
+    // Test Coverage Data
+    public TestCoverageReport CoverageReport { get; set; }
+    public Dictionary<string, LineCoverage> LineCoverageData { get; set; } = new();
+    public List<string> IgnoredCoverageRegions { get; set; } = new();
+    public List<CoverageTrendPoint> HistoricalCoverage { get; set; } = new();
+    public CoverageValidationResult CoverageValidation { get; set; } = new();
+}
+
+public class CoverageValidationResult
+{
+    public bool MeetsThreshold { get; set; }
+    public double ThresholdPercentage { get; set; }
+    public Dictionary<string, double> ModuleThresholds { get; set; } = new();
+    public List<string> ModulesBelowThreshold { get; set; } = new();
+    public List<CoverageRecommendation> ImprovementSuggestions { get; set; } = new();
 }
 
 public enum ValidationState

@@ -2,7 +2,9 @@ using System;
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using CodeBuddy.Core.Models;
+using CodeBuddy.Core.Models.TestCoverage;
 using CodeBuddy.Core.Implementation.CodeValidation.Monitoring;
+using CodeBuddy.Core.Implementation.CodeValidation.Coverage;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation;
 
@@ -21,6 +23,7 @@ public class ValidationPipeline
     // Resource throttling state
     private readonly SemaphoreSlim _validationThrottle;
     private readonly ConcurrentQueue<ResourceSnapshot> _resourceHistory;
+    private readonly ITestCoverageGenerator TestCoverageGenerator;
     private readonly ConcurrentDictionary<string, int> _criticalValidationReservations;
     private volatile bool _isThrottled;
     private DateTime _lastThrottlingAdjustment;
@@ -31,7 +34,8 @@ public class ValidationPipeline
         IMetricsAggregator metricsAggregator,
         IResourceAlertManager alertManager,
         IResourceAnalytics resourceAnalytics,
-        IValidationCache validationCache)
+        IValidationCache validationCache,
+        ITestCoverageGenerator testCoverageGenerator)
     {
         _logger = logger;
         _middleware = new List<IValidationMiddleware>();
@@ -42,6 +46,7 @@ public class ValidationPipeline
         _alertManager = alertManager;
         _resourceAnalytics = resourceAnalytics;
         _validationCache = validationCache;
+        TestCoverageGenerator = testCoverageGenerator;
         
         // Initialize resource throttling
         _validationThrottle = new SemaphoreSlim(config.MaxConcurrentValidations);
@@ -94,6 +99,41 @@ public class ValidationPipeline
         {
             ValidationDelegate pipeline = BuildPipeline(context);
             var pipelineResult = await pipeline(context);
+
+            // Generate test coverage report
+            if (context.Options?.GenerateCoverageReport == true)
+            {
+                try
+                {
+                    var coverageReport = await TestCoverageGenerator.GenerateReportAsync(context);
+                    pipelineResult.CoverageReport = coverageReport;
+
+                    // Generate HTML and JSON reports if requested
+                    if (context.Options.GenerateHtmlCoverageReport)
+                    {
+                        var htmlReport = await TestCoverageGenerator.GenerateHtmlReportAsync(coverageReport);
+                        // Store HTML report (implementation specific)
+                    }
+
+                    if (context.Options.GenerateJsonCoverageReport)
+                    {
+                        var jsonReport = await TestCoverageGenerator.GenerateJsonReportAsync(coverageReport);
+                        // Store JSON report (implementation specific)
+                    }
+
+                    // Validate coverage thresholds
+                    await TestCoverageGenerator.ValidateCoverageThresholdsAsync(coverageReport, pipelineResult);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to generate test coverage report");
+                    pipelineResult.Issues.Add(new ValidationIssue
+                    {
+                        Severity = ValidationSeverity.Warning,
+                        Message = "Failed to generate test coverage report: " + ex.Message
+                    });
+                }
+            }
             
             // Merge pipeline result with our tracking
             result.IsValid = pipelineResult.IsValid;
