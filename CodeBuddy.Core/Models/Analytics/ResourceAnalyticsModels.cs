@@ -39,6 +39,52 @@ namespace CodeBuddy.Core.Models
         public TrendAnalysis MemoryTrend { get; set; }
         public TrendAnalysis DiskIOTrend { get; set; }
         public PredictedResourceUsage PredictedUsage { get; set; }
+        public Dictionary<string, TrendAnalysis> ValidatorTrends { get; set; }
+        public TimeSpan AnalysisPeriod { get; set; }
+        public List<ResourceEfficiencyMetric> EfficiencyMetrics { get; set; }
+    }
+
+    public class ResourceEfficiencyMetric
+    {
+        public string MetricName { get; set; }
+        public double CurrentValue { get; set; }
+        public double OptimalValue { get; set; }
+        public string OptimizationSuggestion { get; set; }
+        public double PotentialImprovementPercent { get; set; }
+    }
+
+    public class DashboardView
+    {
+        public string ViewName { get; set; }
+        public string Description { get; set; }
+        public List<DashboardWidget> Widgets { get; set; }
+        public Dictionary<string, string> Configuration { get; set; }
+    }
+
+    public class DashboardWidget
+    {
+        public string WidgetId { get; set; }
+        public string WidgetType { get; set; }
+        public string Title { get; set; }
+        public Dictionary<string, object> Data { get; set; }
+        public Dictionary<string, string> Configuration { get; set; }
+    }
+
+    public class ResourceMetricExport
+    {
+        public DateTime ExportTimestamp { get; set; }
+        public TimeRange TimeRange { get; set; }
+        public List<ResourceUsageData> UsageData { get; set; }
+        public List<ResourceBottleneck> Bottlenecks { get; set; }
+        public List<ResourceOptimizationRecommendation> Recommendations { get; set; }
+        public ResourceUsageTrends Trends { get; set; }
+    }
+
+    public class TimeRange
+    {
+        public DateTime StartTime { get; set; }
+        public DateTime EndTime { get; set; }
+        public string Resolution { get; set; }
     }
 
     public class ResourceBottleneck
