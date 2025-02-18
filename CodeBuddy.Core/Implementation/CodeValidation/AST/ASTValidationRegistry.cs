@@ -5,17 +5,21 @@ using CodeBuddy.Core.Models.AST;
 namespace CodeBuddy.Core.Implementation.CodeValidation.AST
 {
     /// <summary>
-    /// Registry for language-specific AST validation rules
+    /// Registry for language-specific AST validation rules with cross-language type checking support
     /// </summary>
     public class ASTValidationRegistry
     {
         private readonly Dictionary<string, Dictionary<string, TypeInfo>> _languageTypeRules;
         private readonly Dictionary<string, List<RelationshipRule>> _relationshipRules;
+        private readonly UnifiedTypeSystem _typeSystem;
+        private readonly Dictionary<string, Dictionary<string, CrossLanguageTypeRule>> _crossLanguageRules;
 
-        public ASTValidationRegistry()
+        public ASTValidationRegistry(UnifiedTypeSystem typeSystem = null)
         {
             _languageTypeRules = new Dictionary<string, Dictionary<string, TypeInfo>>();
             _relationshipRules = new Dictionary<string, List<RelationshipRule>>();
+            _crossLanguageRules = new Dictionary<string, Dictionary<string, CrossLanguageTypeRule>>();
+            _typeSystem = typeSystem ?? new UnifiedTypeSystem();
             InitializeDefaultRules();
         }
 
@@ -69,7 +73,45 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.AST
                 : Enumerable.Empty<RelationshipRule>();
         }
 
+        /// <summary>
+        /// Registers a cross-language type validation rule
+        /// </summary>
+        public void RegisterCrossLanguageRule(string sourceLanguage, string targetLanguage, CrossLanguageTypeRule rule)
+        {
+            var key = GetCrossLanguageKey(sourceLanguage, targetLanguage);
+            if (!_crossLanguageRules.ContainsKey(key))
+            {
+                _crossLanguageRules[key] = new Dictionary<string, CrossLanguageTypeRule>();
+            }
+
+            _crossLanguageRules[key][rule.SourceType] = rule;
+        }
+
+        /// <summary>
+        /// Gets cross-language validation rules for the given languages
+        /// </summary>
+        public CrossLanguageTypeRule GetCrossLanguageRule(
+            string sourceLanguage, string targetLanguage, string sourceType)
+        {
+            var key = GetCrossLanguageKey(sourceLanguage, targetLanguage);
+            return _crossLanguageRules.TryGetValue(key, out var rules) &&
+                   rules.TryGetValue(sourceType, out var rule)
+                ? rule
+                : null;
+        }
+
+        private string GetCrossLanguageKey(string sourceLanguage, string targetLanguage)
+        {
+            return $"{sourceLanguage}->{targetLanguage}";
+        }
+
         private void InitializeDefaultRules()
+        {
+            InitializeLanguageRules();
+            InitializeCrossLanguageRules();
+        }
+
+        private void InitializeLanguageRules()
         {
             // Initialize C# rules
             var csharpTypes = new Dictionary<string, TypeInfo>
@@ -119,7 +161,7 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.AST
             RegisterLanguageTypes("C#", csharpTypes);
             RegisterRelationshipRules("C#", csharpRelationships);
 
-            // Initialize JavaScript rules
+            // Initialize JavaScript rules with type coercion rules
             var jsTypes = new Dictionary<string, TypeInfo>
             {
                 ["Function"] = new TypeInfo
@@ -139,7 +181,7 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.AST
 
             RegisterLanguageTypes("JavaScript", jsTypes);
 
-            // Initialize Python rules
+            // Initialize Python rules with dynamic typing support
             var pythonTypes = new Dictionary<string, TypeInfo>
             {
                 ["Function"] = new TypeInfo
@@ -158,6 +200,101 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.AST
             };
 
             RegisterLanguageTypes("Python", pythonTypes);
+        }
+
+        private void InitializeCrossLanguageRules()
+        {
+            // C# -> JavaScript type conversion rules
+            RegisterCrossLanguageRules("C#", "JavaScript", new[]
+            {
+                new CrossLanguageTypeRule
+                {
+                    SourceType = "int",
+                    TargetType = "number",
+                    IsImplicitlyConvertible = true,
+                    ValidationLogic = (source, target, context) => true, // Safe conversion
+                    ConversionWarnings = new List<string>()
+                },
+                new CrossLanguageTypeRule
+                {
+                    SourceType = "decimal",
+                    TargetType = "number",
+                    IsImplicitlyConvertible = false,
+                    ValidationLogic = (source, target, context) => true,
+                    ConversionWarnings = new List<string>
+                    {
+                        "Possible loss of precision when converting decimal to JavaScript number"
+                    }
+                }
+            });
+
+            // JavaScript -> C# type conversion rules
+            RegisterCrossLanguageRules("JavaScript", "C#", new[]
+            {
+                new CrossLanguageTypeRule
+                {
+                    SourceType = "number",
+                    TargetType = "int",
+                    IsImplicitlyConvertible = false,
+                    ValidationLogic = (source, target, context) =>
+                        double.TryParse(source.Properties["Value"]?.ToString() ?? "", out var value) &&
+                        value >= int.MinValue && value <= int.MaxValue,
+                    ConversionWarnings = new List<string>
+                    {
+                        "JavaScript numbers are always floating-point. Ensure value is within integer range.",
+                        "Use Math.floor() or Math.round() before conversion to ensure whole number."
+                    }
+                }
+            });
+
+            // Python -> C# type conversion rules
+            RegisterCrossLanguageRules("Python", "C#", new[]
+            {
+                new CrossLanguageTypeRule
+                {
+                    SourceType = "int",
+                    TargetType = "int",
+                    IsImplicitlyConvertible = false,
+                    ValidationLogic = (source, target, context) => true,
+                    ConversionWarnings = new List<string>
+                    {
+                        "Python integers have unlimited precision. Ensure value fits within C# int range."
+                    }
+                },
+                new CrossLanguageTypeRule
+                {
+                    SourceType = "list",
+                    TargetType = "List<T>",
+                    IsImplicitlyConvertible = false,
+                    ValidationLogic = (source, target, context) =>
+                    {
+                        // Check element type compatibility
+                        var sourceElements = source.Children.Where(c => c.NodeType == "Element");
+                        var targetType = target.GetTypeInformation().GenericParameters.FirstOrDefault();
+                        return sourceElements.All(element =>
+                        {
+                            var (elementType, _) = context.TypeChecker.InferType(element, context);
+                            return _typeSystem.AreTypesCompatible(
+                                source.SourceLanguage, elementType,
+                                target.SourceLanguage, targetType);
+                        });
+                    },
+                    ConversionWarnings = new List<string>
+                    {
+                        "Ensure all list elements are of compatible types",
+                        "Python lists can contain mixed types - ensure consistent typing"
+                    }
+                }
+            });
+        }
+
+        private void RegisterCrossLanguageRules(string sourceLanguage, string targetLanguage,
+            IEnumerable<CrossLanguageTypeRule> rules)
+        {
+            foreach (var rule in rules)
+            {
+                RegisterCrossLanguageRule(sourceLanguage, targetLanguage, rule);
+            }
         }
     }
 

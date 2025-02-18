@@ -120,6 +120,57 @@ namespace CodeBuddy.Core.Models.AST
         }
 
         /// <summary>
+        /// Gets the inferred type of this node, if available
+        /// </summary>
+        public string GetInferredType()
+        {
+            return Properties.TryGetValue("InferredType", out var type) ? type.ToString() : null;
+        }
+
+        /// <summary>
+        /// Sets the inferred type for this node
+        /// </summary>
+        public void SetInferredType(string type)
+        {
+            Properties["InferredType"] = type;
+        }
+
+        /// <summary>
+        /// Checks if this node has type information
+        /// </summary>
+        public bool HasTypeInformation()
+        {
+            return Properties.ContainsKey("InferredType") || 
+                   Properties.ContainsKey("Type") ||
+                   Properties.ContainsKey("ReturnType");
+        }
+
+        /// <summary>
+        /// Gets complete type information including nullability and generics
+        /// </summary>
+        public TypeInformation GetTypeInformation()
+        {
+            var typeInfo = new TypeInformation
+            {
+                BaseType = GetInferredType() ?? 
+                          (Properties.TryGetValue("Type", out var type) ? type.ToString() : null) ??
+                          (Properties.TryGetValue("ReturnType", out var returnType) ? returnType.ToString() : null),
+                IsNullable = Properties.TryGetValue("IsNullable", out var nullable) && (bool)nullable,
+                GenericParameters = Properties.TryGetValue("GenericParameters", out var generics) 
+                    ? ((string[])generics).ToList() 
+                    : new List<string>()
+            };
+
+            if (Properties.TryGetValue("TypeConstraints", out var constraints))
+            {
+                typeInfo.Constraints = ((Dictionary<string, string>)constraints)
+                    .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+            }
+
+            return typeInfo;
+        }
+
+        /// <summary>
         /// Gets all ancestors of this node up to the root
         /// </summary>
         public IEnumerable<UnifiedASTNode> GetAncestors()
@@ -174,5 +225,33 @@ namespace CodeBuddy.Core.Models.AST
         public int StartColumn { get; set; }
         public int EndColumn { get; set; }
         public string FilePath { get; set; }
+    }
+
+    /// <summary>
+    /// Represents detailed type information for a node
+    /// </summary>
+    public class TypeInformation
+    {
+        public string BaseType { get; set; }
+        public bool IsNullable { get; set; }
+        public List<string> GenericParameters { get; set; }
+        public Dictionary<string, string> Constraints { get; set; }
+
+        public override string ToString()
+        {
+            var result = BaseType;
+            
+            if (GenericParameters?.Any() == true)
+            {
+                result += $"<{string.Join(", ", GenericParameters)}>";
+            }
+            
+            if (IsNullable)
+            {
+                result += "?";
+            }
+
+            return result;
+        }
     }
 }

@@ -6,15 +6,81 @@ using CodeBuddy.Core.Models.AST;
 namespace CodeBuddy.Core.Implementation.CodeValidation.AST
 {
     /// <summary>
-    /// Implements semantic validation and analysis for AST nodes
+    /// Implements semantic validation and analysis for AST nodes with cross-language type checking
     /// </summary>
     public class ASTSemanticValidator : IASTValidator
     {
         private readonly ASTValidationRegistry _validationRegistry;
+        private readonly UnifiedTypeSystem _typeSystem;
 
-        public ASTSemanticValidator(ASTValidationRegistry validationRegistry)
+        public ASTSemanticValidator(ASTValidationRegistry validationRegistry, UnifiedTypeSystem typeSystem)
         {
             _validationRegistry = validationRegistry;
+            _typeSystem = typeSystem;
+        }
+
+        /// <summary>
+        /// Infers and validates types for cross-language operations
+        /// </summary>
+        public (string inferredType, List<ASTValidationError>) InferType(UnifiedASTNode node, SemanticContext context)
+        {
+            var errors = new List<ASTValidationError>();
+            string inferredType = null;
+
+            switch (node.NodeType)
+            {
+                case "Literal":
+                    inferredType = InferLiteralType(node);
+                    break;
+
+                case "VariableReference":
+                    var declaration = FindVariableDeclaration(node.Name, context);
+                    if (declaration != null)
+                    {
+                        inferredType = declaration.Properties.TryGetValue("Type", out var type)
+                            ? type.ToString()
+                            : null;
+                    }
+                    else
+                    {
+                        errors.Add(new ASTValidationError
+                        {
+                            ErrorCode = "TYPE001",
+                            Message = $"Cannot infer type for undeclared variable '{node.Name}'",
+                            Severity = ErrorSeverity.Error,
+                            Location = node.Location
+                        });
+                    }
+                    break;
+
+                case "MethodCall":
+                    var methodDecl = FindMethodDeclaration(node.Name, context);
+                    if (methodDecl != null)
+                    {
+                        inferredType = methodDecl.Properties.TryGetValue("ReturnType", out var returnType)
+                            ? returnType.ToString()
+                            : null;
+                            
+                        // Validate method parameters
+                        var paramErrors = ValidateMethodParameters(node, methodDecl, context);
+                        errors.AddRange(paramErrors);
+                    }
+                    else
+                    {
+                        errors.Add(new ASTValidationError
+                        {
+                            ErrorCode = "TYPE002",
+                            Message = $"Cannot infer return type for undeclared method '{node.Name}'",
+                            Severity = ErrorSeverity.Error,
+                            Location = node.Location
+                        });
+                    }
+                    break;
+
+                // Add more type inference cases...
+            }
+
+            return (inferredType, errors);
         }
 
         public IEnumerable<ASTValidationError> ValidateNode(UnifiedASTNode node)
@@ -106,6 +172,21 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.AST
                     ProcessDeclaration(node, context);
                 }
 
+                // Type inference and validation
+                var (inferredType, typeErrors) = InferType(node, context);
+                if (inferredType != null)
+                {
+                    node.Properties["InferredType"] = inferredType;
+                }
+                result.Errors.AddRange(typeErrors);
+
+                // Cross-language type validation
+                if (node.Parent != null)
+                {
+                    var crossLanguageErrors = ValidateCrossLanguageTypes(node, context);
+                    result.Errors.AddRange(crossLanguageErrors);
+                }
+
                 // Analyze node semantics
                 var semanticErrors = AnalyzeNodeSemantics(node, context);
                 result.Errors.AddRange(semanticErrors);
@@ -179,6 +260,14 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.AST
 
         private bool ValidatePropertyType(object value, string expectedType)
         {
+            var actualType = value?.GetType().Name.ToLower();
+            if (actualType == null) return false;
+
+            // First check unified type system
+            if (_typeSystem.AreTypesCompatible("C#", actualType, "C#", expectedType))
+                return true;
+
+            // Fallback to basic type checks
             return expectedType.ToLower() switch
             {
                 "string" => value is string,
@@ -268,6 +357,142 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.AST
         {
             return allNodes.Where(n => n.NodeType == targetType &&
                                      IsNodeRelated(sourceNode, n));
+        }
+
+        private string InferLiteralType(UnifiedASTNode node)
+        {
+            if (!node.Properties.TryGetValue("Value", out var value))
+                return null;
+
+            return value switch
+            {
+                int => "int",
+                long => "long",
+                float => "float",
+                double => "double",
+                decimal => "decimal",
+                bool => "bool",
+                string => "string",
+                _ => value.GetType().Name
+            };
+        }
+
+        private IEnumerable<ASTValidationError> ValidateMethodParameters(
+            UnifiedASTNode methodCall,
+            UnifiedASTNode methodDecl,
+            SemanticContext context)
+        {
+            var errors = new List<ASTValidationError>();
+            var parameters = methodCall.Children.Where(c => c.NodeType == "Argument").ToList();
+            var parameterDecls = methodDecl.Children.Where(c => c.NodeType == "Parameter").ToList();
+
+            if (parameters.Count != parameterDecls.Count)
+            {
+                errors.Add(new ASTValidationError
+                {
+                    ErrorCode = "TYPE003",
+                    Message = $"Method '{methodCall.Name}' expects {parameterDecls.Count} parameters but got {parameters.Count}",
+                    Severity = ErrorSeverity.Error,
+                    Location = methodCall.Location
+                });
+                return errors;
+            }
+
+            for (int i = 0; i < parameters.Count; i++)
+            {
+                var (paramType, paramErrors) = InferType(parameters[i], context);
+                errors.AddRange(paramErrors);
+
+                if (paramType != null)
+                {
+                    var expectedType = parameterDecls[i].Properties["Type"].ToString();
+                    if (!ValidateTypeCompatibility(
+                        parameters[i].SourceLanguage, paramType,
+                        methodDecl.SourceLanguage, expectedType,
+                        parameters[i], out var typeError))
+                    {
+                        errors.Add(typeError);
+                    }
+                }
+            }
+
+            return errors;
+        }
+
+        private IEnumerable<ASTValidationError> ValidateCrossLanguageTypes(
+            UnifiedASTNode node,
+            SemanticContext context)
+        {
+            var errors = new List<ASTValidationError>();
+
+            // Skip if both nodes are from the same language
+            if (node.Parent == null || node.SourceLanguage == node.Parent.SourceLanguage)
+                return errors;
+
+            // Get the types for both nodes
+            var (nodeType, nodeErrors) = InferType(node, context);
+            errors.AddRange(nodeErrors);
+
+            var (parentType, parentErrors) = InferType(node.Parent, context);
+            errors.AddRange(parentErrors);
+
+            if (nodeType != null && parentType != null)
+            {
+                if (!ValidateTypeCompatibility(
+                    node.SourceLanguage, nodeType,
+                    node.Parent.SourceLanguage, parentType,
+                    node, out var typeError))
+                {
+                    errors.Add(typeError);
+                }
+            }
+
+            return errors;
+        }
+
+        private bool ValidateTypeCompatibility(
+            string sourceLanguage, string sourceType,
+            string targetLanguage, string targetType,
+            UnifiedASTNode node, out ASTValidationError error)
+        {
+            error = null;
+
+            if (!_typeSystem.AreTypesCompatible(sourceLanguage, sourceType, targetLanguage, targetType))
+            {
+                var (canConvert, warning) = _typeSystem.CanConvertWithoutLoss(
+                    sourceLanguage, sourceType,
+                    targetLanguage, targetType);
+
+                if (!canConvert)
+                {
+                    var suggestions = _typeSystem.GetConversionSuggestions(
+                        sourceLanguage, sourceType,
+                        targetLanguage, targetType);
+
+                    error = new ASTValidationError
+                    {
+                        ErrorCode = "TYPE004",
+                        Message = $"Incompatible types: cannot convert from {sourceLanguage}.{sourceType} to {targetLanguage}.{targetType}. " +
+                                 (warning != null ? $"\nWarning: {warning}" : "") +
+                                 (suggestions.Any() ? $"\nSuggestions:\n- {string.Join("\n- ", suggestions)}" : ""),
+                        Severity = ErrorSeverity.Error,
+                        Location = node.Location
+                    };
+                    return false;
+                }
+                else if (warning != null)
+                {
+                    error = new ASTValidationError
+                    {
+                        ErrorCode = "TYPE005",
+                        Message = $"Type conversion warning: {warning}",
+                        Severity = ErrorSeverity.Warning,
+                        Location = node.Location
+                    };
+                }
+            }
+
+            return true;
         }
 
         private bool IsNodeRelated(UnifiedASTNode source, UnifiedASTNode target)
