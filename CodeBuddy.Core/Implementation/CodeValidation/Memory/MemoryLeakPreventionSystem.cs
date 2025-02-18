@@ -229,28 +229,183 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Memory
 
             public T Acquire<T>() where T : class, new()
             {
-                var pool = _pools.GetOrAdd(typeof(T), 
+                var type = typeof(T);
+                var pool = _pools.GetOrAdd(type, 
                     _ => new ConcurrentQueue<object>());
+                
+                var metrics = _poolMetrics.GetOrAdd(type, _ => new PoolMetrics
+                {
+                    CurrentSize = pool.Count,
+                    TargetSize = pool.Count,
+                    LastOptimization = DateTime.UtcNow
+                });
+
+                metrics.TotalRequests++;
 
                 if (pool.TryDequeue(out var obj))
                 {
+                    // Track allocation time
+                    metrics.AllocationTimestamps.Add(DateTime.UtcNow);
+                    if (metrics.AllocationTimestamps.Count > 1000) // Keep last 1000 timestamps
+                    {
+                        metrics.AllocationTimestamps.RemoveAt(0);
+                    }
                     return (T)obj;
                 }
 
+                metrics.CacheMisses++;
                 return new T();
             }
 
             public void Release<T>(T obj) where T : class
             {
-                var pool = _pools.GetOrAdd(typeof(T), 
+                var type = typeof(T);
+                var pool = _pools.GetOrAdd(type, 
                     _ => new ConcurrentQueue<object>());
-                pool.Enqueue(obj);
+                var metrics = _poolMetrics.GetOrAdd(type, _ => new PoolMetrics
+                {
+                    CurrentSize = pool.Count,
+                    TargetSize = pool.Count,
+                    LastOptimization = DateTime.UtcNow
+                });
+
+                // Only add to pool if we haven't exceeded target size
+                if (pool.Count < metrics.TargetSize)
+                {
+                    pool.Enqueue(obj);
+                    metrics.CurrentSize = pool.Count;
+                }
+
+                // Update average object lifetime if we have allocation timestamp
+                if (metrics.AllocationTimestamps.Any())
+                {
+                    var allocationTime = metrics.AllocationTimestamps[0];
+                    metrics.AllocationTimestamps.RemoveAt(0);
+                    
+                    var lifetime = DateTime.UtcNow - allocationTime;
+                    metrics.AverageObjectLifetime = metrics.AverageObjectLifetime == 0 ?
+                        lifetime.TotalMilliseconds :
+                        (metrics.AverageObjectLifetime + lifetime.TotalMilliseconds) / 2;
+                }
             }
 
-            public Task OptimizePoolSizeAsync(LeakPredictionResult prediction)
+            private readonly ConcurrentDictionary<Type, PoolMetrics> _poolMetrics = new();
+            private const int MIN_POOL_SIZE = 10;
+            private const int MAX_POOL_SIZE = 1000;
+            private const double GROWTH_THRESHOLD = 0.75;
+            private const double SHRINK_THRESHOLD = 0.25;
+            
+            private class PoolMetrics
             {
-                // Implement pool size optimization based on prediction
-                return Task.CompletedTask;
+                public int CurrentSize { get; set; }
+                public int TargetSize { get; set; }
+                public Queue<int> UsageHistory { get; } = new Queue<int>(30); // Last 30 samples
+                public DateTime LastOptimization { get; set; }
+                public int PeakUsage { get; set; }
+                public int TotalRequests { get; set; }
+                public int CacheMisses { get; set; }
+                public double AverageObjectLifetime { get; set; }
+                public List<DateTime> AllocationTimestamps { get; } = new();
+                public List<DateTime> PeakUsagePeriods { get; } = new();
+            }
+
+            public async Task OptimizePoolSizeAsync(LeakPredictionResult prediction)
+            {
+                foreach (var poolEntry in _pools)
+                {
+                    var type = poolEntry.Key;
+                    var pool = poolEntry.Value;
+                    var metrics = _poolMetrics.GetOrAdd(type, _ => new PoolMetrics 
+                    { 
+                        CurrentSize = pool.Count,
+                        TargetSize = pool.Count,
+                        LastOptimization = DateTime.UtcNow
+                    });
+
+                    // Update metrics
+                    metrics.TotalRequests++;
+                    metrics.UsageHistory.Enqueue(pool.Count);
+                    if (pool.Count > metrics.PeakUsage)
+                    {
+                        metrics.PeakUsage = pool.Count;
+                        metrics.PeakUsagePeriods.Add(DateTime.UtcNow);
+                    }
+                    if (metrics.UsageHistory.Count > 30)
+                    {
+                        metrics.UsageHistory.Dequeue();
+                    }
+
+                    // Calculate utilization
+                    double currentUtilization = (double)pool.Count / metrics.TargetSize;
+                    double avgUtilization = metrics.UsageHistory.Average() / metrics.TargetSize;
+                    
+                    // Analyze peak usage patterns
+                    var recentPeaks = metrics.PeakUsagePeriods
+                        .Where(p => p >= DateTime.UtcNow.AddHours(-24))
+                        .ToList();
+                    
+                    // Calculate optimal pool size
+                    int newTargetSize = metrics.TargetSize;
+                    
+                    if (avgUtilization > GROWTH_THRESHOLD || recentPeaks.Count > 5)
+                    {
+                        // Growth needed
+                        newTargetSize = Math.Min(
+                            MAX_POOL_SIZE,
+                            (int)(metrics.TargetSize * (1 + (avgUtilization - GROWTH_THRESHOLD)))
+                        );
+                    }
+                    else if (avgUtilization < SHRINK_THRESHOLD && DateTime.UtcNow - metrics.LastOptimization > TimeSpan.FromMinutes(30))
+                    {
+                        // Shrink pool if consistently underutilized
+                        newTargetSize = Math.Max(
+                            MIN_POOL_SIZE,
+                            (int)(metrics.TargetSize * avgUtilization * 1.5) // Keep some buffer
+                        );
+                    }
+
+                    // Consider memory pressure
+                    if (prediction.MemoryFragmentation > _config.MaxFragmentationPercent)
+                    {
+                        newTargetSize = Math.Min(newTargetSize, metrics.CurrentSize);
+                    }
+
+                    // Apply changes if needed
+                    if (newTargetSize != metrics.TargetSize)
+                    {
+                        metrics.TargetSize = newTargetSize;
+                        metrics.LastOptimization = DateTime.UtcNow;
+
+                        // Adjust pool size
+                        if (newTargetSize < pool.Count)
+                        {
+                            while (pool.Count > newTargetSize && pool.TryDequeue(out _)) { }
+                        }
+                        
+                        // Record telemetry
+                        await RecordPoolOptimizationTelemetryAsync(type, metrics, prediction);
+                    }
+                }
+            }
+
+            private async Task RecordPoolOptimizationTelemetryAsync(Type type, PoolMetrics metrics, LeakPredictionResult prediction)
+            {
+                var telemetry = new PoolOptimizationTelemetry
+                {
+                    TypeName = type.Name,
+                    Timestamp = DateTime.UtcNow,
+                    PreviousSize = metrics.CurrentSize,
+                    NewSize = metrics.TargetSize,
+                    AverageUtilization = metrics.UsageHistory.Average() / metrics.CurrentSize,
+                    PeakUsage = metrics.PeakUsage,
+                    CacheMissRate = metrics.TotalRequests > 0 ? 
+                        (double)metrics.CacheMisses / metrics.TotalRequests : 0,
+                    MemoryPressure = prediction.MemoryFragmentation,
+                    LeakProbability = prediction.LeakProbability
+                };
+
+                // Store telemetry (implementation dependent on telemetry system)
+                await Task.CompletedTask; // Replace with actual telemetry storage
             }
 
             public Task DefragmentAsync()
@@ -361,6 +516,19 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Memory
                 return Task.CompletedTask;
             }
         }
+    }
+
+    public class PoolOptimizationTelemetry
+    {
+        public string TypeName { get; set; }
+        public DateTime Timestamp { get; set; }
+        public int PreviousSize { get; set; }
+        public int NewSize { get; set; }
+        public double AverageUtilization { get; set; }
+        public int PeakUsage { get; set; }
+        public double CacheMissRate { get; set; }
+        public double MemoryPressure { get; set; }
+        public double LeakProbability { get; set; }
     }
 
     public class LeakPredictionResult
