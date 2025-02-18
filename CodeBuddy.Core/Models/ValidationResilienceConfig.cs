@@ -17,6 +17,16 @@ public class ValidationResilienceConfig
     public bool EnableAutomaticFailover { get; set; } = true;
     public LoadBalancingStrategy LoadBalancingStrategy { get; set; } = LoadBalancingStrategy.ResourceAware;
     
+    // Predictive Scaling Configuration
+    public bool PredictiveScalingEnabled { get; set; } = true;
+    public TimeSpan HistoricalDataRetentionPeriod { get; set; } = TimeSpan.FromDays(30);
+    public double PredictionConfidenceThreshold { get; set; } = 0.8; // 80% confidence required for scaling decisions
+    public TimeSpan ScalingLeadTime { get; set; } = TimeSpan.FromMinutes(5); // How far ahead to predict
+    public int MinDataPointsForPrediction { get; set; } = 100; // Minimum historical data points needed
+    public TimeSpan PredictionInterval { get; set; } = TimeSpan.FromSeconds(30); // How often to update predictions
+    public double ScalingGradualityFactor { get; set; } = 0.2; // Max 20% change in resources per adjustment
+    public bool EnablePredictionMetrics { get; set; } = true;
+    
     // Resource Throttling Configuration
     public double MaxCpuThresholdPercent { get; set; } = 80.0;
     public double MaxMemoryThresholdMB { get; set; } = 1024.0; // 1GB

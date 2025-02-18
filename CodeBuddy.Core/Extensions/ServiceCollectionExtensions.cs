@@ -1,55 +1,26 @@
-using System;
 using Microsoft.Extensions.DependencyInjection;
-using CodeBuddy.Core.Implementation.CodeValidation.Monitoring;
-using CodeBuddy.Core.Models;
+using CodeBuddy.Core.Implementation;
+using CodeBuddy.Core.Interfaces;
+using CodeBuddy.Core.Implementation.CodeValidation;
 
-namespace CodeBuddy.Core.Extensions
+namespace CodeBuddy.Core.Extensions;
+
+public static class ServiceCollectionExtensions
 {
-    public static class ServiceCollectionExtensions
+    public static IServiceCollection AddCodeBuddyCore(this IServiceCollection services)
     {
-        public static IServiceCollection AddResourceAlertSystem(this IServiceCollection services, Action<AlertConfiguration> configure = null)
-        {
-            var config = new AlertConfiguration();
-            configure?.Invoke(config);
+        // Core services
+        services.AddScoped<IConfigurationManager, ConfigurationManager>();
+        services.AddScoped<IPluginManager, PluginManager>();
+        services.AddScoped<IPluginState, DefaultPluginState>();
+        services.AddScoped<IPluginConfiguration, DefaultPluginConfiguration>();
+        services.AddScoped<ITemplateManager, TemplateManager>();
+        services.AddScoped<ICodeGenerator, CodeGenerator>();
+        services.AddScoped<IFileOperations, FileOperations>();
 
-            // Register default thresholds if not configured
-            if (config.Thresholds.Count == 0)
-            {
-                config.Thresholds[ResourceMetricType.CPU] = new ResourceThreshold
-                {
-                    MetricType = ResourceMetricType.CPU,
-                    WarningThreshold = 70,
-                    CriticalThreshold = 85,
-                    EmergencyThreshold = 95,
-                    SustainedDuration = TimeSpan.FromMinutes(5),
-                    RateOfChangeThreshold = 10 // percent per minute
-                };
-
-                config.Thresholds[ResourceMetricType.Memory] = new ResourceThreshold
-                {
-                    MetricType = ResourceMetricType.Memory,
-                    WarningThreshold = 70,
-                    CriticalThreshold = 85,
-                    EmergencyThreshold = 95,
-                    SustainedDuration = TimeSpan.FromMinutes(5),
-                    RateOfChangeThreshold = 100 // MB per minute
-                };
-
-                config.Thresholds[ResourceMetricType.DiskIO] = new ResourceThreshold
-                {
-                    MetricType = ResourceMetricType.DiskIO,
-                    WarningThreshold = 50,
-                    CriticalThreshold = 75,
-                    EmergencyThreshold = 90,
-                    SustainedDuration = TimeSpan.FromMinutes(2),
-                    RateOfChangeThreshold = 50 // MB/s per minute
-                };
-            }
-
-            services.AddSingleton(config);
-            services.AddSingleton<IResourceAlertManager, ResourceAlertManager>();
-
-            return services;
-        }
+        // Validation services
+        services.AddSingleton<PredictiveResourceManager>();
+        
+        return services;
     }
 }

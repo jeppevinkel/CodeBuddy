@@ -16,6 +16,7 @@ public class ValidationPipeline
     private readonly IMetricsAggregator _metricsAggregator;
     private readonly IResourceAlertManager _alertManager;
     private readonly IResourceAnalytics _resourceAnalytics;
+    private readonly PredictiveResourceManager _predictiveResourceManager;
     
     // Resource throttling state
     private readonly SemaphoreSlim _validationThrottle;
@@ -29,9 +30,11 @@ public class ValidationPipeline
         ValidationResilienceConfig config,
         IMetricsAggregator metricsAggregator,
         IResourceAlertManager alertManager,
-        IResourceAnalytics resourceAnalytics)
+        IResourceAnalytics resourceAnalytics,
+        PredictiveResourceManager predictiveResourceManager)
     {
         _logger = logger;
+        _predictiveResourceManager = predictiveResourceManager;
         _middleware = new List<IValidationMiddleware>();
         _circuitBreakers = new ConcurrentDictionary<string, CircuitBreakerState>();
         _metrics = new ConcurrentDictionary<string, MiddlewareMetrics>();
@@ -355,13 +358,19 @@ public class ValidationPipeline
 
     private void StartResourceMonitoring()
     {
+        // Initialize predictive resource manager
+        if (_config.PredictiveScalingEnabled)
+        {
+            _ = _predictiveResourceManager.InitializeAsync();
+        }
+
         Task.Run(async () =>
         {
             while (true)
             {
                 EmitResourceMetrics();
                 UpdateResourceHistory();
-                AdjustThrottlingParameters();
+                await AdjustThrottlingParameters();
                 await Task.Delay(TimeSpan.FromSeconds(1));
             }
         });
@@ -434,9 +443,10 @@ public class ValidationPipeline
         }
     }
 
-    private void AdjustThrottlingParameters()
+    private async Task AdjustThrottlingParameters()
     {
-        if (!_config.EnableAdaptiveThrottling ||
+        // Check if either adaptive throttling or predictive scaling is enabled
+        if ((!_config.EnableAdaptiveThrottling && !_config.PredictiveScalingEnabled) ||
             (DateTime.UtcNow - _lastThrottlingAdjustment) < TimeSpan.FromMinutes(1))
         {
             return;
@@ -471,6 +481,37 @@ public class ValidationPipeline
         }
 
         _lastThrottlingAdjustment = DateTime.UtcNow;
+
+        // Apply predictive scaling if enabled
+        if (_config.PredictiveScalingEnabled)
+        {
+            var recommendation = await _predictiveResourceManager.GetScalingRecommendationAsync("ValidationPipeline");
+            
+            if (recommendation.ShouldScale && recommendation.RecommendedConcurrency.HasValue)
+            {
+                var newLimit = recommendation.RecommendedConcurrency.Value;
+                _validationThrottle.Release(_validationThrottle.CurrentCount);
+                _validationThrottle = new SemaphoreSlim(newLimit);
+                _isThrottled = newLimit < _config.MaxConcurrentValidations;
+                
+                _logger.LogInformation(
+                    "Predictive scaling adjusted concurrent limit to {Limit} (Confidence: {Confidence:P2}, Predicted CPU: {PredictedCpu:F1}%, Memory: {PredictedMemory:F1}MB)",
+                    newLimit,
+                    recommendation.Confidence,
+                    recommendation.PredictedCpuUsage,
+                    recommendation.PredictedMemoryUsage);
+
+                if (_config.EnablePredictionMetrics)
+                {
+                    _metricsAggregator.RecordScalingDecision(
+                        "ValidationPipeline",
+                        recommendation.Confidence,
+                        newLimit,
+                        recommendation.PredictedCpuUsage ?? 0,
+                        recommendation.PredictedMemoryUsage ?? 0);
+                }
+            }
+        }
     }
 
     private double CalculateResourceTrend(List<ResourceSnapshot> metrics)
