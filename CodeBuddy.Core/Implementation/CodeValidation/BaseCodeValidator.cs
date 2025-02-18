@@ -93,6 +93,9 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     private readonly ObjectPool<byte[]> _bufferPool;
     private readonly ConcurrentQueue<IDisposable> _disposables = new();
     private readonly SemaphoreSlim _cleanupLock = new(1, 1);
+    private readonly BlockingCollection<ValidationTask> _validationQueue;
+    private readonly CancellationTokenSource _queueProcessingCts;
+    private readonly Task _queueProcessingTask;
     private bool _disposed;
     private FileOperationProgress _progress;
     
@@ -101,6 +104,9 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     private const long CriticalMemoryThresholdBytes = 800 * 1024 * 1024; // 800MB
     private const int MaxTemporaryFiles = 100;
     private const int BatchSize = 1024 * 1024; // 1MB batch size for large files
+    private const int MaxQueueSize = 1000;
+    private const int MaxConcurrentOperations = 4;
+    private static readonly TimeSpan ResourceMonitoringInterval = TimeSpan.FromSeconds(1);
 
     protected BaseCodeValidator(ILogger logger)
     {
@@ -108,12 +114,109 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
         _resourceTracker = new ResourceUsageTracker();
         _bufferPool = ObjectPool.Create<byte[]>();
         _progress = new FileOperationProgress();
+        _validationQueue = new BlockingCollection<ValidationTask>(MaxQueueSize);
+        _queueProcessingCts = new CancellationTokenSource();
+        
+        // Start queue processing
+        _queueProcessingTask = ProcessValidationQueueAsync(_queueProcessingCts.Token);
         
         // Register memory pressure listener
         GC.AddMemoryPressureListener(OnMemoryPressure);
+        
+        // Start resource monitoring
+        StartResourceMonitoring();
+    }
+
+    private class ValidationTask
+    {
+        public string Code { get; set; }
+        public ValidationOptions Options { get; set; }
+        public TaskCompletionSource<ValidationResult> CompletionSource { get; set; }
+        public CancellationToken CancellationToken { get; set; }
+    }
+
+    private async Task ProcessValidationQueueAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var semaphore = new SemaphoreSlim(MaxConcurrentOperations);
+            
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                if (_validationQueue.TryTake(out var task, Timeout.Infinite, cancellationToken))
+                {
+                    await semaphore.WaitAsync(cancellationToken);
+                    
+                    _ = ProcessValidationTaskAsync(task, semaphore)
+                        .ContinueWith(t =>
+                        {
+                            if (t.IsFaulted)
+                                task.CompletionSource.TrySetException(t.Exception.InnerExceptions);
+                        }, TaskContinuationOptions.OnlyOnFaulted);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Normal cancellation, ignore
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in validation queue processing");
+        }
+    }
+
+    private async Task ProcessValidationTaskAsync(ValidationTask task, SemaphoreSlim semaphore)
+    {
+        try
+        {
+            var result = await ValidateInternalAsync(task.Code, task.Options, task.CancellationToken);
+            task.CompletionSource.TrySetResult(result);
+        }
+        catch (Exception ex)
+        {
+            task.CompletionSource.TrySetException(ex);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    private void StartResourceMonitoring()
+    {
+        Task.Run(async () =>
+        {
+            while (!_disposed)
+            {
+                await MonitorResourcesAsync(CancellationToken.None);
+                await Task.Delay(ResourceMonitoringInterval);
+            }
+        });
     }
 
     public async Task<ValidationResult> ValidateAsync(string code, string language, ValidationOptions options, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        
+        var validationTask = new ValidationTask
+        {
+            Code = code,
+            Options = options,
+            CompletionSource = new TaskCompletionSource<ValidationResult>(),
+            CancellationToken = cancellationToken
+        };
+
+        // Add to processing queue
+        if (!_validationQueue.TryAdd(validationTask))
+        {
+            throw new InvalidOperationException("Validation queue is full. Please try again later.");
+        }
+
+        return await validationTask.CompletionSource.Task;
+    }
+
+    private async Task<ValidationResult> ValidateInternalAsync(string code, ValidationOptions options, CancellationToken cancellationToken)
     {
         var result = new ValidationResult { Language = language };
         _totalStopwatch.Restart();
@@ -403,6 +506,56 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     {
         try
         {
+            // Stop queue processing
+            _queueProcessingCts.Cancel();
+            await Task.WhenAny(_queueProcessingTask, Task.Delay(5000)); // Wait up to 5 seconds
+            
+            // Stop accepting new items and clear queue
+            _validationQueue.CompleteAdding();
+            while (_validationQueue.TryTake(out var task))
+            {
+                task.CompletionSource.TrySetCanceled();
+            }
+            
+            await _cleanupLock.WaitAsync().ConfigureAwait(false);
+            
+            // Dispose all tracked disposables
+            while (_disposables.TryDequeue(out var disposable))
+            {
+                try
+                {
+                    if (disposable is IAsyncDisposable asyncDisposable)
+                        await asyncDisposable.DisposeAsync().ConfigureAwait(false);
+                    else
+                        disposable.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error disposing resource during cleanup");
+                }
+            }
+
+            // Clean up temporary files
+            await CleanupTemporaryFilesAsync().ConfigureAwait(false);
+            
+            // Release memory pressure listener
+            GC.RemoveMemoryPressureListener(OnMemoryPressure);
+            
+            // Dispose queues and other resources
+            _validationQueue.Dispose();
+            _queueProcessingCts.Dispose();
+            
+            // Wait for any ongoing operations to complete
+            await Task.Delay(100).ConfigureAwait(false);
+        }
+        finally
+        {
+            _cleanupLock.Release();
+        }
+    }
+    {
+        try
+        {
             await _cleanupLock.WaitAsync().ConfigureAwait(false);
             
             // Dispose all tracked disposables
@@ -458,7 +611,7 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
             _temporaryFiles.Count);
     }
 
-    private async Task ProcessLargeFileAsync(string code, string language, ValidationOptions options, CancellationToken cancellationToken)
+    private async Task<ValidationResult> ProcessLargeFileAsync(string code, string language, ValidationOptions options, CancellationToken cancellationToken)
     {
         var result = new ValidationResult { Language = language };
         var batches = (code.Length + BatchSize - 1) / BatchSize;
@@ -519,16 +672,58 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     {
         _logger.LogWarning("Initiating emergency cleanup due to high memory usage");
         
-        // Clear all caches and temporary storage
-        _phaseStopwatches.Clear();
-        CleanupTemporaryFiles();
-        
-        // Force garbage collection
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        
-        // Allow system to stabilize
-        await Task.Delay(100);
+        try
+        {
+            await _cleanupLock.WaitAsync();
+            
+            // Stop accepting new tasks
+            _validationQueue.CompleteAdding();
+            
+            // Clear all queues and caches
+            while (_validationQueue.TryTake(out _)) { }
+            _phaseStopwatches.Clear();
+            _bufferPool.Clear();
+            
+            // Cleanup all temporary resources
+            await CleanupTemporaryFilesAsync();
+            
+            // Clear pooled objects
+            while (_disposables.TryDequeue(out var disposable))
+            {
+                try
+                {
+                    if (disposable is IAsyncDisposable asyncDisposable)
+                        await asyncDisposable.DisposeAsync();
+                    else
+                        disposable.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error disposing resource during emergency cleanup");
+                }
+            }
+            
+            // Force garbage collection
+            for (int i = 0; i < 2; i++)
+            {
+                GC.Collect(2, GCCollectionMode.Aggressive, true);
+                GC.WaitForPendingFinalizers();
+            }
+            
+            // Allow system to stabilize
+            await Task.Delay(200);
+            
+            // Reset validation queue
+            _validationQueue.Dispose();
+            var newQueue = new BlockingCollection<ValidationTask>(MaxQueueSize);
+            Interlocked.Exchange(ref _validationQueue, newQueue);
+            
+            _logger.LogInformation("Emergency cleanup completed successfully");
+        }
+        finally
+        {
+            _cleanupLock.Release();
+        }
     }
 
     /// <summary>
@@ -602,6 +797,66 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     }
 
     private void DetectBottlenecks(PerformanceMetrics metrics)
+    {
+        // Track validation queue metrics
+        metrics.ResourceUtilization["QueueLength"] = _validationQueue.Count;
+        metrics.ResourceUtilization["QueueCapacityPercent"] = (_validationQueue.Count / (double)MaxQueueSize) * 100;
+
+        // Identify phases that took more than 25% of total time
+        var totalTime = metrics.PhaseTimings.Values.Sum(t => t.TotalMilliseconds);
+        foreach (var (phase, timing) in metrics.PhaseTimings)
+        {
+            var percentage = (timing.TotalMilliseconds / totalTime) * 100;
+            if (percentage > 25)
+            {
+                metrics.Bottlenecks.Add(new PerformanceBottleneck
+                {
+                    Phase = phase,
+                    Description = $"Phase takes {percentage:F1}% of total validation time",
+                    ImpactScore = percentage,
+                    Recommendation = "Consider optimizing this phase or running it in parallel if possible"
+                });
+            }
+        }
+
+        // Queue bottleneck detection
+        if (_validationQueue.Count > MaxQueueSize * 0.8)
+        {
+            metrics.Bottlenecks.Add(new PerformanceBottleneck
+            {
+                Phase = "ValidationQueue",
+                Description = "Validation queue is near capacity",
+                ImpactScore = 85,
+                Recommendation = "Consider increasing queue size or adding more processing capacity"
+            });
+        }
+
+        // Memory usage analysis
+        var currentMemory = Process.GetCurrentProcess().WorkingSet64;
+        if (currentMemory > MemoryThresholdBytes)
+        {
+            metrics.Bottlenecks.Add(new PerformanceBottleneck
+            {
+                Phase = "Memory",
+                Description = "High memory usage detected",
+                ImpactScore = (int)((currentMemory / (double)CriticalMemoryThresholdBytes) * 100),
+                Recommendation = "Review memory allocation patterns and consider implementing memory pooling"
+            });
+        }
+
+        // Resource pool efficiency
+        var disposableCount = _disposables.Count;
+        if (disposableCount > 1000)
+        {
+            metrics.Bottlenecks.Add(new PerformanceBottleneck
+            {
+                Phase = "ResourcePool",
+                Description = "Large number of disposable resources",
+                ImpactScore = 70,
+                Recommendation = "Implement more aggressive resource cleanup or pooling"
+            });
+        }
+    }
     {
         // Identify phases that took more than 25% of total time
         var totalTime = metrics.PhaseTimings.Values.Sum(t => t.TotalMilliseconds);
