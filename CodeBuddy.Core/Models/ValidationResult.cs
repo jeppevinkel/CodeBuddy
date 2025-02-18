@@ -8,6 +8,51 @@ public class ValidationResult
     public List<ValidationIssue> Issues { get; set; } = new();
     public string Language { get; set; }
     public ValidationStatistics Statistics { get; set; } = new();
+    
+    // Error recovery and resilience information
+    public ValidationState State { get; set; } = ValidationState.NotStarted;
+    public bool IsPartialSuccess { get; set; }
+    public List<MiddlewareFailure> FailedMiddleware { get; set; } = new();
+    public List<string> SkippedMiddleware { get; set; } = new();
+    public RecoveryMetrics RecoveryStats { get; set; } = new();
+}
+
+public enum ValidationState
+{
+    NotStarted,
+    InProgress,
+    Completed,
+    CompletedWithErrors,
+    Failed,
+    Recovered
+}
+
+public class MiddlewareFailure
+{
+    public string MiddlewareName { get; set; }
+    public string ErrorMessage { get; set; }
+    public string StackTrace { get; set; }
+    public int FailureCount { get; set; }
+    public int RetryAttempts { get; set; }
+    public bool CircuitBreakerTripped { get; set; }
+    public Dictionary<string, string> Context { get; set; } = new();
+}
+
+public class RecoveryMetrics
+{
+    public int TotalRecoveryAttempts { get; set; }
+    public int SuccessfulRecoveries { get; set; }
+    public double AverageRecoveryTimeMs { get; set; }
+    public List<FailurePattern> DetectedPatterns { get; set; } = new();
+    public double PerformanceImpactMs { get; set; }
+}
+
+public class FailurePattern
+{
+    public string Pattern { get; set; }
+    public int Occurrences { get; set; }
+    public DateTime FirstOccurrence { get; set; }
+    public DateTime LastOccurrence { get; set; }
 }
 
 public class ValidationIssue
