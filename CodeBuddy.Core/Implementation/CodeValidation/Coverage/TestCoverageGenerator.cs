@@ -70,24 +70,155 @@ public class TestCoverageGenerator : ITestCoverageGenerator
 
     public async Task ValidateCoverageThresholdsAsync(TestCoverageReport report, ValidationResult result)
     {
+        var configuration = result.Context.GetConfiguration<CoverageConfiguration>();
         var validation = new CoverageValidationResult
         {
-            ThresholdPercentage = 80.0, // Default threshold, should be configurable
-            ModuleThresholds = new Dictionary<string, double>()
+            ActualOverallCoverage = report.OverallCoveragePercentage,
+            RequiredOverallThreshold = configuration.OverallThreshold,
+            MeetsOverallThreshold = report.OverallCoveragePercentage >= configuration.OverallThreshold
         };
 
-        // Validate overall coverage
-        validation.MeetsThreshold = report.OverallCoveragePercentage >= validation.ThresholdPercentage;
+        // Validate module coverage
+        foreach (var module in report.CoverageByModule)
+        {
+            if (configuration.ShouldExclude(module.Value.FilePath))
+                continue;
 
-        // Validate per-module coverage
-        validation.ModulesBelowThreshold = report.CoverageByModule
-            .Where(m => m.Value.CoveragePercentage < validation.ThresholdPercentage)
-            .Select(m => m.Key)
-            .ToList();
+            var moduleThreshold = configuration.GetThresholdForModule(module.Key);
+            var moduleResult = new ModuleValidationResult
+            {
+                ModuleName = module.Key,
+                ActualCoverage = module.Value.CoveragePercentage,
+                RequiredThreshold = moduleThreshold,
+                MeetsThreshold = module.Value.CoveragePercentage >= moduleThreshold,
+                ComponentCoverage = module.Value.FunctionCoverage
+            };
 
-        // Generate improvement suggestions
-        validation.ImprovementSuggestions = await _recommendationEngine
-            .GenerateRecommendationsAsync(report, validation.ModulesBelowThreshold);
+            if (!moduleResult.MeetsThreshold)
+            {
+                validation.Violations.Add(new CoverageViolation
+                {
+                    Type = "ModuleCoverage",
+                    Description = $"Module {module.Key} has insufficient coverage",
+                    Severity = "High",
+                    Location = module.Value.FilePath,
+                    RequiredCoverage = moduleThreshold,
+                    ActualCoverage = module.Value.CoveragePercentage,
+                    Impact = "Module does not meet minimum coverage requirements"
+                });
+            }
+
+            validation.ModuleResults.Add(moduleResult);
+        }
+
+        // Validate critical paths
+        if (configuration.ValidationRules.EnforceCriticalPathCoverage)
+        {
+            foreach (var criticalPath in report.CoverageByModule.Where(m => 
+                m.Value.FunctionCoverage.Keys.Any(f => f.Contains("Critical") || f.Contains("Core"))))
+            {
+                var pathResult = new CriticalPathValidation
+                {
+                    PathName = criticalPath.Key,
+                    Coverage = criticalPath.Value.CoveragePercentage,
+                    RequiredThreshold = configuration.ValidationRules.CriticalPathThreshold,
+                    MeetsThreshold = criticalPath.Value.CoveragePercentage >= configuration.ValidationRules.CriticalPathThreshold
+                };
+
+                if (!pathResult.MeetsThreshold)
+                {
+                    validation.Violations.Add(new CoverageViolation
+                    {
+                        Type = "CriticalPath",
+                        Description = $"Critical path {criticalPath.Key} has insufficient coverage",
+                        Severity = "Critical",
+                        Location = criticalPath.Value.FilePath,
+                        RequiredCoverage = configuration.ValidationRules.CriticalPathThreshold,
+                        ActualCoverage = criticalPath.Value.CoveragePercentage,
+                        Impact = "High-risk area with inadequate test coverage"
+                    });
+                }
+
+                validation.CriticalPathResults.Add(pathResult);
+            }
+        }
+
+        // Validate API coverage
+        if (configuration.ValidationRules.ValidatePublicApiCoverage)
+        {
+            foreach (var api in report.CoverageByModule.Where(m => 
+                m.Value.FunctionCoverage.Keys.Any(f => f.StartsWith("public") || f.Contains("API"))))
+            {
+                var apiResult = new ApiCoverageValidation
+                {
+                    ApiName = api.Key,
+                    Coverage = api.Value.CoveragePercentage,
+                    RequiredThreshold = configuration.ValidationRules.PublicApiCoverageThreshold,
+                    MeetsThreshold = api.Value.CoveragePercentage >= configuration.ValidationRules.PublicApiCoverageThreshold
+                };
+
+                if (!apiResult.MeetsThreshold)
+                {
+                    validation.Violations.Add(new CoverageViolation
+                    {
+                        Type = "PublicApi",
+                        Description = $"Public API {api.Key} has insufficient coverage",
+                        Severity = "High",
+                        Location = api.Value.FilePath,
+                        RequiredCoverage = configuration.ValidationRules.PublicApiCoverageThreshold,
+                        ActualCoverage = api.Value.CoveragePercentage,
+                        Impact = "Public interface lacks adequate test coverage"
+                    });
+                }
+
+                validation.ApiCoverageResults.Add(apiResult);
+            }
+        }
+
+        // Analyze coverage trends
+        validation.TrendAnalysis = new CoverageTrendAnalysis
+        {
+            TrendPoints = report.CoverageTrends,
+            CoverageChange = report.CoverageTrends.Count > 1 
+                ? report.CoverageTrends.Last().OverallCoverage - report.CoverageTrends.First().OverallCoverage
+                : 0,
+            HasNegativeTrend = report.CoverageTrends.Count > 1 && 
+                report.CoverageTrends.Last().OverallCoverage < report.CoverageTrends.First().OverallCoverage
+        };
+
+        // Prevent coverage decreases if configured
+        if (configuration.ValidationRules.PreventCoverageDecrease && validation.TrendAnalysis.HasNegativeTrend)
+        {
+            validation.Violations.Add(new CoverageViolation
+            {
+                Type = "CoverageDecrease",
+                Description = "Overall test coverage has decreased",
+                Severity = "Medium",
+                Location = "Project",
+                RequiredCoverage = report.CoverageTrends.First().OverallCoverage,
+                ActualCoverage = report.CoverageTrends.Last().OverallCoverage,
+                Impact = "Code quality regression detected"
+            });
+        }
+
+        // Generate recommendations
+        validation.Recommendations = await _recommendationEngine.GenerateRecommendationsAsync(report);
+
+        // Perform risk assessment
+        validation.RiskAssessment = new RiskAssessment
+        {
+            OverallRiskLevel = validation.Violations.Any(v => v.Severity == "Critical") ? "High" : 
+                              validation.Violations.Any(v => v.Severity == "High") ? "Medium" : "Low",
+            IdentifiedRisks = validation.Violations.Select(v => new CoverageRisk
+            {
+                Area = v.Location,
+                RiskLevel = v.Severity,
+                Description = v.Description,
+                Impact = v.Severity == "Critical" ? 3 : v.Severity == "High" ? 2 : 1,
+                Probability = (v.RequiredCoverage - v.ActualCoverage) > 20 ? 3 : 
+                            (v.RequiredCoverage - v.ActualCoverage) > 10 ? 2 : 1
+            }).ToList()
+        };
 
         result.CoverageValidation = validation;
     }
