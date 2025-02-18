@@ -91,6 +91,33 @@ namespace CodeBuddy.CLI.Commands
             prCommand.AddCommand(createPrCommand);
             AddCommand(prCommand);
 
+            // Credentials management commands
+            var credentialsCommand = new Command("credentials", "Manage Git credentials");
+            
+            var setCredentialsCommand = new Command("set", "Set Git credentials");
+            var usernameOption = new Option<string>("--username", "Git username");
+            var passwordOption = new Option<string>("--password", "Git password");
+            var tokenOption = new Option<string>("--token", "Git access token");
+            var keyPathOption = new Option<string>("--key", "Path to SSH key");
+            setCredentialsCommand.AddOption(usernameOption);
+            setCredentialsCommand.AddOption(passwordOption);
+            setCredentialsCommand.AddOption(tokenOption);
+            setCredentialsCommand.AddOption(keyPathOption);
+            setCredentialsCommand.SetHandler(async (string username, string password, string token, string keyPath) =>
+                await HandleSetCredentialsAsync(username, password, token, keyPath),
+                usernameOption, passwordOption, tokenOption, keyPathOption);
+
+            var validateCredentialsCommand = new Command("validate", "Validate current Git credentials");
+            validateCredentialsCommand.SetHandler(HandleValidateCredentialsAsync);
+
+            var clearCredentialsCommand = new Command("clear", "Clear stored Git credentials");
+            clearCredentialsCommand.SetHandler(HandleClearCredentialsAsync);
+
+            credentialsCommand.AddCommand(setCredentialsCommand);
+            credentialsCommand.AddCommand(validateCredentialsCommand);
+            credentialsCommand.AddCommand(clearCredentialsCommand);
+            AddCommand(credentialsCommand);
+
             // CodeBuddy specific commands
             var setupCommand = new Command("setup", "Set up CodeBuddy files in repository");
             var projectNameOption = new Option<string>("--name", "Project name");
@@ -312,6 +339,71 @@ namespace CodeBuddy.CLI.Commands
             catch (Exception ex)
             {
                 Console.WriteLine($"Error creating pull request: {ex.Message}");
+            }
+        }
+
+        private async Task HandleSetCredentialsAsync(string username, string password, string token, string keyPath)
+        {
+            try
+            {
+                var credentials = new Core.Models.Git.GitCredentials
+                {
+                    Username = username,
+                    Password = password,
+                    Token = token,
+                    KeyPath = keyPath
+                };
+
+                if (await _gitService.SetCredentialsAsync(credentials))
+                {
+                    Console.WriteLine("Git credentials set successfully.");
+                }
+                else
+                {
+                    Console.WriteLine("Failed to set Git credentials.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error setting credentials: {ex.Message}");
+            }
+        }
+
+        private async Task HandleValidateCredentialsAsync()
+        {
+            try
+            {
+                if (await _gitService.ValidateCredentialsAsync())
+                {
+                    Console.WriteLine("Git credentials are valid.");
+                }
+                else
+                {
+                    Console.WriteLine("Git credentials are invalid or not set.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error validating credentials: {ex.Message}");
+            }
+        }
+
+        private async Task HandleClearCredentialsAsync()
+        {
+            try
+            {
+                if (await _gitService.ClearCredentialsAsync())
+                {
+                    Console.WriteLine("Git credentials cleared successfully.");
+                }
+                else
+                {
+                    Console.WriteLine("Failed to clear Git credentials.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error clearing credentials: {ex.Message}");
             }
         }
 

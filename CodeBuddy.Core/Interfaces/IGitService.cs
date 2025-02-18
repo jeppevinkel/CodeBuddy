@@ -1,9 +1,14 @@
 using System.Threading.Tasks;
+using CodeBuddy.Core.Models.Git;
 
 namespace CodeBuddy.Core.Interfaces
 {
     public interface IGitService
     {
+        // Credentials Management
+        Task<bool> SetCredentialsAsync(GitCredentials credentials);
+        Task<bool> ValidateCredentialsAsync();
+        Task<bool> ClearCredentialsAsync();
         // Branch Management
         Task<bool> CreateBranchAsync(string branchName);
         Task<bool> DeleteBranchAsync(string branchName);
