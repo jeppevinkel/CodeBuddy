@@ -91,6 +91,13 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     private readonly List<string> _temporaryFiles = new();
     private readonly ResourceUsageTracker _resourceTracker;
     private readonly ObjectPool<byte[]> _bufferPool;
+    private readonly MemoryPressureMonitor _memoryMonitor;
+    
+    // Enhanced memory thresholds with progressive cleanup
+    private const long LowMemoryThresholdBytes = 300 * 1024 * 1024; // 300MB
+    private const long MediumMemoryThresholdBytes = 500 * 1024 * 1024; // 500MB
+    private const long HighMemoryThresholdBytes = 700 * 1024 * 1024; // 700MB
+    private const long CriticalMemoryThresholdBytes = 900 * 1024 * 1024; // 900MB
     private readonly ConcurrentQueue<IDisposable> _disposables = new();
     private readonly SemaphoreSlim _cleanupLock = new(1, 1);
     private readonly BlockingCollection<ValidationTask> _validationQueue;
@@ -112,6 +119,7 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     {
         _logger = logger;
         _resourceTracker = new ResourceUsageTracker();
+        _memoryMonitor = new MemoryPressureMonitor(logger, OnMemoryPressureChanged);
         _bufferPool = ObjectPool.Create<byte[]>();
         _progress = new FileOperationProgress();
         _validationQueue = new BlockingCollection<ValidationTask>(MaxQueueSize);
@@ -329,12 +337,80 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     /// <summary>
     /// Monitors and manages resource usage during validation.
     /// </summary>
+    /// <summary>
+    /// Monitors memory pressure and triggers progressive cleanup based on thresholds
+    /// </summary>
+    private class MemoryPressureMonitor : IDisposable
+    {
+        private readonly ILogger _logger;
+        private readonly Action<MemoryPressureLevel> _onPressureChanged;
+        private readonly Timer _monitoringTimer;
+        private bool _disposed;
+        
+        public MemoryPressureMonitor(ILogger logger, Action<MemoryPressureLevel> onPressureChanged)
+        {
+            _logger = logger;
+            _onPressureChanged = onPressureChanged;
+            _monitoringTimer = new Timer(CheckMemoryPressure, null, 1000, 1000);
+        }
+        
+        private void CheckMemoryPressure(object state)
+        {
+            if (_disposed) return;
+            
+            var currentMemory = Process.GetCurrentProcess().WorkingSet64;
+            var pressureLevel = GetPressureLevel(currentMemory);
+            
+            _logger.LogDebug("Current memory usage: {MemoryMB}MB, Pressure Level: {Level}", 
+                currentMemory / (1024 * 1024), pressureLevel);
+            
+            _onPressureChanged(pressureLevel);
+        }
+        
+        private MemoryPressureLevel GetPressureLevel(long currentMemory)
+        {
+            if (currentMemory >= CriticalMemoryThresholdBytes) return MemoryPressureLevel.Critical;
+            if (currentMemory >= HighMemoryThresholdBytes) return MemoryPressureLevel.High;
+            if (currentMemory >= MediumMemoryThresholdBytes) return MemoryPressureLevel.Medium;
+            if (currentMemory >= LowMemoryThresholdBytes) return MemoryPressureLevel.Low;
+            return MemoryPressureLevel.None;
+        }
+        
+        public void Dispose()
+        {
+            if (!_disposed)
+            {
+                _monitoringTimer?.Dispose();
+                _disposed = true;
+            }
+        }
+    }
+    
+    private enum MemoryPressureLevel
+    {
+        None,
+        Low,
+        Medium,
+        High,
+        Critical
+    }
+    
     private class ResourceUsageTracker : IDisposable
     {
-        private Timer _monitoringTimer;
+        private readonly Timer _monitoringTimer;
         private long _currentMemoryUsage;
         private int _handleCount;
+        private readonly ConcurrentDictionary<string, ResourceInfo> _resourceRegistry;
         private bool _disposed;
+
+        private class ResourceInfo
+        {
+            public DateTime CreatedAt { get; set; }
+            public long SizeBytes { get; set; }
+            public string Type { get; set; }
+            public bool IsTemporary { get; set; }
+            public bool IsDisposed { get; set; }
+        }
 
         public long CurrentMemoryUsage => _currentMemoryUsage;
         public int HandleCount => _handleCount;
@@ -342,6 +418,39 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
         public ResourceUsageTracker()
         {
             _monitoringTimer = new Timer(MonitorResources, null, 1000, 1000);
+            _resourceRegistry = new ConcurrentDictionary<string, ResourceInfo>();
+        }
+
+        public void RegisterResource(string resourceId, long sizeBytes, string type, bool isTemporary = false)
+        {
+            _resourceRegistry[resourceId] = new ResourceInfo
+            {
+                CreatedAt = DateTime.UtcNow,
+                SizeBytes = sizeBytes,
+                Type = type,
+                IsTemporary = isTemporary,
+                IsDisposed = false
+            };
+        }
+
+        public void MarkResourceDisposed(string resourceId)
+        {
+            if (_resourceRegistry.TryGetValue(resourceId, out var info))
+            {
+                info.IsDisposed = true;
+            }
+        }
+
+        public IEnumerable<(string Id, ResourceInfo Info)> GetUndisposedResources()
+        {
+            return _resourceRegistry
+                .Where(kvp => !kvp.Value.IsDisposed)
+                .Select(kvp => (kvp.Key, kvp.Value));
+        }
+
+        public long GetTotalResourceSize()
+        {
+            return _resourceRegistry.Sum(kvp => kvp.Value.IsDisposed ? 0 : kvp.Value.SizeBytes);
         }
 
         public async Task MonitorResourcesAsync()
@@ -377,22 +486,80 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     /// <summary>
     /// Performs gradual cleanup of resources when approaching thresholds
     /// </summary>
-    private async Task GradualCleanupAsync()
+    private async Task HandleMemoryPressureAsync(MemoryPressureLevel pressureLevel)
+    {
+        _logger.LogInformation("Handling memory pressure level: {Level}", pressureLevel);
+        
+        switch (pressureLevel)
+        {
+            case MemoryPressureLevel.Low:
+                await PerformLightCleanupAsync();
+                break;
+            
+            case MemoryPressureLevel.Medium:
+                await PerformModerateCleanupAsync();
+                break;
+            
+            case MemoryPressureLevel.High:
+                await PerformAggressiveCleanupAsync();
+                break;
+            
+            case MemoryPressureLevel.Critical:
+                await EmergencyCleanupAsync();
+                break;
+        }
+    }
+
+    private async Task PerformLightCleanupAsync()
     {
         await _cleanupLock.WaitAsync();
         try
         {
-            // Release unused buffers
+            // Light cleanup - just release unused resources
             _bufferPool.Clear();
+            GC.Collect(0, GCCollectionMode.Optimized, false);
+            _logger.LogInformation("Performed light cleanup");
+        }
+        finally
+        {
+            _cleanupLock.Release();
+        }
+    }
 
-            // Cleanup older temporary files
+    private async Task PerformModerateCleanupAsync()
+    {
+        await _cleanupLock.WaitAsync();
+        try
+        {
+            // Moderate cleanup - release resources and some temp files
+            _bufferPool.Clear();
             if (_temporaryFiles.Count > MaxTemporaryFiles / 2)
             {
                 await CleanupOldestTemporaryFilesAsync(MaxTemporaryFiles / 4);
             }
+            GC.Collect(1, GCCollectionMode.Optimized, false);
+            _logger.LogInformation("Performed moderate cleanup");
+        }
+        finally
+        {
+            _cleanupLock.Release();
+        }
+    }
 
-            // Suggest garbage collection
-            GC.Collect(0, GCCollectionMode.Optimized, false);
+    private async Task PerformAggressiveCleanupAsync()
+    {
+        await _cleanupLock.WaitAsync();
+        try
+        {
+            // Aggressive cleanup - clear most caches and temp files
+            _bufferPool.Clear();
+            await CleanupTemporaryFiles();
+            _phaseStopwatches.Clear();
+            
+            GC.Collect(2, GCCollectionMode.Aggressive, true);
+            GC.WaitForPendingFinalizers();
+            
+            _logger.LogWarning("Performed aggressive cleanup due to high memory pressure");
         }
         finally
         {
@@ -752,7 +919,7 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     /// <summary>
     /// Cleans up all temporary files.
     /// </summary>
-    private void CleanupTemporaryFiles()
+    private async Task CleanupTemporaryFiles()
     {
         foreach (var file in _temporaryFiles.ToList())
         {
@@ -760,21 +927,76 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
             {
                 if (System.IO.File.Exists(file))
                 {
-                    System.IO.File.Delete(file);
+                    await Task.Run(() => System.IO.File.Delete(file));
                 }
                 _temporaryFiles.Remove(file);
+                _logger.LogInformation("Cleaned up temporary file: {File}", file);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error cleaning up temporary file: {File}", file);
+                await AttemptRecoveryForFile(file);
             }
         }
     }
 
-    private void CollectPerformanceMetrics(ValidationResult result)
+    private async Task AttemptRecoveryForFile(string file)
+    {
+        try
+        {
+            // Wait briefly and retry deletion
+            await Task.Delay(100);
+            if (System.IO.File.Exists(file))
+            {
+                await Task.Run(() => System.IO.File.Delete(file));
+                _temporaryFiles.Remove(file);
+                _logger.LogInformation("Successfully recovered and cleaned up file: {File}", file);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Recovery attempt failed for file: {File}", file);
+        }
+    }
+
+    private async Task CollectPerformanceMetrics(ValidationResult result)
     {
         _totalStopwatch.Stop();
         var metrics = result.Statistics.Performance;
+        
+        // Enhanced metrics collection
+        var currentProcess = Process.GetCurrentProcess();
+        
+        metrics.SystemMetrics = new Dictionary<string, double>
+        {
+            ["ProcessorTime"] = currentProcess.TotalProcessorTime.TotalMilliseconds,
+            ["PrivateMemorySize"] = currentProcess.PrivateMemorySize64,
+            ["PeakWorkingSet"] = currentProcess.PeakWorkingSet64,
+            ["PeakVirtualMemory"] = currentProcess.PeakVirtualMemorySize64,
+            ["ThreadCount"] = currentProcess.Threads.Count,
+            ["HandleCount"] = currentProcess.HandleCount
+        };
+        
+        // Resource tracking metrics
+        metrics.ResourceMetrics = new Dictionary<string, double>
+        {
+            ["TotalManagedResources"] = _resourceTracker.GetUndisposedResources().Count(),
+            ["TotalResourceSize"] = _resourceTracker.GetTotalResourceSize(),
+            ["TemporaryFileCount"] = _temporaryFiles.Count,
+            ["DisposableQueueSize"] = _disposables.Count,
+            ["ValidationQueueSize"] = _validationQueue.Count,
+            ["ValidationQueueUtilization"] = (_validationQueue.Count / (double)MaxQueueSize) * 100
+        };
+        
+        // Memory pressure metrics
+        var memoryInfo = GC.GetGCMemoryInfo();
+        metrics.GCMetrics = new Dictionary<string, double>
+        {
+            ["TotalAvailableMemory"] = memoryInfo.TotalAvailableMemoryBytes,
+            ["HeapSize"] = memoryInfo.HeapSizeBytes,
+            ["FragmentedBytes"] = memoryInfo.FragmentedBytes,
+            ["MemoryLoadBytes"] = memoryInfo.MemoryLoadBytes
+        };
 
         // Phase timings
         foreach (var (phase, stopwatch) in _phaseStopwatches)
