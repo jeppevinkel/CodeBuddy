@@ -1,96 +1,68 @@
 using System;
 using System.Collections.Generic;
 
-namespace CodeBuddy.Core.Models.Configuration;
-
-/// <summary>
-/// Represents a configuration migration step
-/// </summary>
-public abstract class ConfigurationMigration<T> : IConfigurationMigration where T : class
+namespace CodeBuddy.Core.Models.Configuration
 {
-    public string FromVersion { get; }
-    public string ToVersion { get; }
-    public string Description { get; }
-    
-    protected ConfigurationMigration(string fromVersion, string toVersion, string description)
+    /// <summary>
+    /// Record of a configuration migration
+    /// </summary>
+    public class MigrationRecord
     {
-        FromVersion = fromVersion;
-        ToVersion = toVersion;
-        Description = description;
+        public string ConfigSection { get; set; } = "";
+        public string FromVersion { get; set; } = "";
+        public string ToVersion { get; set; } = "";
+        public DateTime MigrationDate { get; set; }
+        public bool Success { get; set; }
+        public string? BackupPath { get; set; }
+        public string? Description { get; set; }
     }
 
     /// <summary>
-    /// Migrates configuration data from the old version to the new version
+    /// Validation result for configuration migration
     /// </summary>
-    public abstract T Migrate(T configuration);
-    
-    /// <summary>
-    /// Validates the configuration after migration
-    /// </summary>
-    public abstract MigrationValidationResult Validate(T configuration);
-
-    object IConfigurationMigration.Migrate(object configuration) => Migrate((T)configuration);
-    MigrationValidationResult IConfigurationMigration.Validate(object configuration) => Validate((T)configuration);
-}
-
-/// <summary>
-/// Interface for configuration migrations
-/// </summary>
-public interface IConfigurationMigration
-{
-    string FromVersion { get; }
-    string ToVersion { get; }
-    string Description { get; }
-    object Migrate(object configuration);
-    MigrationValidationResult Validate(object configuration);
-}
-
-/// <summary>
-/// Result of a migration validation
-/// </summary>
-public class MigrationValidationResult
-{
-    public bool IsValid { get; set; }
-    public List<string> Errors { get; set; } = new();
-    public List<string> Warnings { get; set; } = new();
-
-    public static MigrationValidationResult Success() => new() { IsValid = true };
-    
-    public static MigrationValidationResult Failed(params string[] errors) => new()
+    public class ValidationResult
     {
-        IsValid = false,
-        Errors = new List<string>(errors)
-    };
-}
+        public bool IsValid { get; set; }
+        public List<string> Errors { get; } = new List<string>();
 
-/// <summary>
-/// Represents a migration record
-/// </summary>
-public class MigrationRecord
-{
-    public string ConfigSection { get; set; } = "";
-    public string FromVersion { get; set; } = "";
-    public string ToVersion { get; set; } = "";
-    public DateTime MigrationDate { get; set; }
-    public bool Success { get; set; }
-    public string? Error { get; set; }
-    public string BackupPath { get; set; } = "";
-}
+        public static ValidationResult Success() => new() { IsValid = true };
 
-/// <summary>
-/// Specifies that a configuration class requires the given migrator type
-/// </summary>
-[AttributeUsage(AttributeTargets.Class)]
-public class RequiresMigrationAttribute : Attribute
-{
-    public Type MigratorType { get; }
-
-    public RequiresMigrationAttribute(Type migratorType)
-    {
-        if (!typeof(IConfigurationMigration).IsAssignableFrom(migratorType))
+        public static ValidationResult Failed(params string[] errors) => new()
         {
-            throw new ArgumentException($"Type {migratorType} must implement IConfigurationMigration");
+            IsValid = false,
+            Errors = { errors }
+        };
+    }
+
+    /// <summary>
+    /// Interface for configuration migration implementations
+    /// </summary>
+    public interface IConfigurationMigration
+    {
+        string FromVersion { get; }
+        string ToVersion { get; }
+        object Migrate(object configuration);
+        ValidationResult Validate(object configuration);
+    }
+
+    /// <summary>
+    /// Attribute to specify required migration for a configuration
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Class, Inherited = false, AllowMultiple = false)]
+    public class RequiresMigrationAttribute : Attribute
+    {
+        public Type MigratorType { get; }
+
+        public RequiresMigrationAttribute(Type migratorType)
+        {
+            if (!typeof(IConfigurationMigration).IsAssignableFrom(migratorType))
+            {
+                throw new ArgumentException(
+                    $"Migrator type must implement {nameof(IConfigurationMigration)}", 
+                    nameof(migratorType));
+            }
+
+            MigratorType = migratorType;
         }
-        MigratorType = migratorType;
     }
 }

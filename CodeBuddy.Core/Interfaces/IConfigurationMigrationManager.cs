@@ -24,4 +24,14 @@ public interface IConfigurationMigrationManager
     /// Gets migration history for a configuration section
     /// </summary>
     IEnumerable<MigrationRecord> GetMigrationHistory(string section);
+
+    /// <summary>
+    /// Validates version compatibility between configuration sections
+    /// </summary>
+    bool ValidateVersionCompatibility(string section, string version);
+
+    /// <summary>
+    /// Adds a version dependency between configuration sections
+    /// </summary>
+    void AddVersionDependency(string section, string dependentSection);
 }
