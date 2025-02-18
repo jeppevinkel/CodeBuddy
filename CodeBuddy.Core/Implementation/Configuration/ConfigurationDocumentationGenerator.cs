@@ -5,6 +5,7 @@ using System.ComponentModel.DataAnnotations;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
 using CodeBuddy.Core.Models.Configuration;
 using Microsoft.Extensions.Logging;
@@ -28,7 +29,8 @@ namespace CodeBuddy.Core.Implementation.Configuration
         }
 
         /// <summary>
-        /// Generates markdown documentation for all configuration sections
+        /// Generates markdown documentation for all configuration sections including examples,
+        /// migration paths, and validation rules
         /// </summary>
         public async Task<string> GenerateDocumentation()
         {
@@ -41,10 +43,41 @@ namespace CodeBuddy.Core.Implementation.Configuration
                 sb.AppendLine();
 
                 var configTypes = GetConfigurationTypes();
+
+                // Table of Contents
+                sb.AppendLine("## Table of Contents");
+                sb.AppendLine();
+                foreach (var type in configTypes)
+                {
+                    sb.AppendLine($"- [{type.Name}](#{type.Name.ToLower()})");
+                }
+                sb.AppendLine();
+
+                // Common Configuration Scenarios
+                sb.AppendLine("## Common Configuration Scenarios");
+                sb.AppendLine();
+                DocumentCommonScenarios(sb);
+
+                // Configuration Migration Guide
+                sb.AppendLine("## Configuration Migration Guide");
+                sb.AppendLine();
+                DocumentMigrationPaths(sb, configTypes);
+
+                // Environment-Specific Configuration
+                sb.AppendLine("## Environment-Specific Configuration");
+                sb.AppendLine();
+                DocumentEnvironmentOverrides(sb);
+
+                // Configuration Sections
                 foreach (var type in configTypes)
                 {
                     DocumentConfigurationType(sb, type);
                 }
+
+                // Configuration Templates
+                sb.AppendLine("## Configuration Templates");
+                sb.AppendLine();
+                GenerateConfigurationTemplates(sb, configTypes);
 
                 return sb.ToString();
             }
@@ -66,6 +99,8 @@ namespace CodeBuddy.Core.Implementation.Configuration
         private void DocumentConfigurationType(StringBuilder sb, Type type)
         {
             var sectionAttr = type.GetCustomAttribute<ConfigurationSectionAttribute>();
+            var schemaVersion = type.GetCustomAttribute<SchemaVersionAttribute>();
+            
             sb.AppendLine($"## {type.Name}");
             sb.AppendLine();
 
@@ -80,9 +115,22 @@ namespace CodeBuddy.Core.Implementation.Configuration
             // Add version info
             if (sectionAttr != null)
             {
-                sb.AppendLine($"**Version:** {sectionAttr.Version}");
+                sb.AppendLine($"**Section:** {sectionAttr.Name}");
                 sb.AppendLine();
             }
+            
+            if (schemaVersion != null)
+            {
+                sb.AppendLine($"**Schema Version:** {schemaVersion.Version}");
+                sb.AppendLine();
+            }
+
+            // Add code example
+            sb.AppendLine("### Example Configuration");
+            sb.AppendLine("```json");
+            sb.AppendLine(GenerateExampleJson(type));
+            sb.AppendLine("```");
+            sb.AppendLine();
 
             // Document properties
             sb.AppendLine("### Properties");
@@ -189,6 +237,116 @@ namespace CodeBuddy.Core.Implementation.Configuration
                 return $"dictionary<{GetFriendlyTypeName(args[0])}, {GetFriendlyTypeName(args[1])}>";
             }
             return type.Name;
+        }
+
+        private void DocumentCommonScenarios(StringBuilder sb)
+        {
+            sb.AppendLine("Here are some common configuration scenarios and how to implement them:");
+            sb.AppendLine();
+            
+            // Development Environment
+            sb.AppendLine("### Development Environment Setup");
+            sb.AppendLine("```json");
+            sb.AppendLine("{");
+            sb.AppendLine("  \"Logging\": {");
+            sb.AppendLine("    \"Level\": \"Debug\",");
+            sb.AppendLine("    \"EnableConsole\": true");
+            sb.AppendLine("  },");
+            sb.AppendLine("  \"Cache\": {");
+            sb.AppendLine("    \"InMemory\": true,");
+            sb.AppendLine("    \"TTLMinutes\": 5");
+            sb.AppendLine("  }");
+            sb.AppendLine("}");
+            sb.AppendLine("```");
+            sb.AppendLine();
+
+            // Production Environment
+            sb.AppendLine("### Production Environment Setup");
+            sb.AppendLine("```json");
+            sb.AppendLine("{");
+            sb.AppendLine("  \"Logging\": {");
+            sb.AppendLine("    \"Level\": \"Warning\",");
+            sb.AppendLine("    \"EnableConsole\": false,");
+            sb.AppendLine("    \"LogToFile\": true");
+            sb.AppendLine("  },");
+            sb.AppendLine("  \"Cache\": {");
+            sb.AppendLine("    \"Distributed\": true,");
+            sb.AppendLine("    \"TTLMinutes\": 60");
+            sb.AppendLine("  }");
+            sb.AppendLine("}");
+            sb.AppendLine("```");
+        }
+
+        private void DocumentMigrationPaths(StringBuilder sb, IEnumerable<Type> types)
+        {
+            foreach (var type in types)
+            {
+                var schemaVersion = type.GetCustomAttribute<SchemaVersionAttribute>();
+                var migrations = type.GetCustomAttributes<ConfigurationMigrationAttribute>();
+
+                if (schemaVersion != null && migrations.Any())
+                {
+                    sb.AppendLine($"### {type.Name}");
+                    sb.AppendLine();
+                    
+                    foreach (var migration in migrations.OrderBy(m => m.FromVersion))
+                    {
+                        sb.AppendLine($"#### {migration.FromVersion} → {migration.ToVersion}");
+                        sb.AppendLine();
+                        sb.AppendLine(migration.Description);
+                        sb.AppendLine();
+                        
+                        if (!string.IsNullOrEmpty(migration.CodeExample))
+                        {
+                            sb.AppendLine("Example:");
+                            sb.AppendLine("```json");
+                            sb.AppendLine(migration.CodeExample);
+                            sb.AppendLine("```");
+                            sb.AppendLine();
+                        }
+                    }
+                }
+            }
+        }
+
+        private void DocumentEnvironmentOverrides(StringBuilder sb)
+        {
+            sb.AppendLine("Configuration values can be overridden based on the environment using:");
+            sb.AppendLine();
+            sb.AppendLine("1. Environment Variables");
+            sb.AppendLine("   ```");
+            sb.AppendLine("   CODEBUDDY_Logging__Level=Debug");
+            sb.AppendLine("   CODEBUDDY_Cache__TTLMinutes=30");
+            sb.AppendLine("   ```");
+            sb.AppendLine();
+            sb.AppendLine("2. Environment-Specific JSON Files");
+            sb.AppendLine("   ```");
+            sb.AppendLine("   appsettings.Development.json");
+            sb.AppendLine("   appsettings.Production.json");
+            sb.AppendLine("   appsettings.Staging.json");
+            sb.AppendLine("   ```");
+        }
+
+        private string GenerateExampleJson(Type type)
+        {
+            var example = Activator.CreateInstance(type);
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true
+            };
+            return JsonSerializer.Serialize(example, type, options);
+        }
+
+        private void GenerateConfigurationTemplates(StringBuilder sb, IEnumerable<Type> types)
+        {
+            foreach (var type in types)
+            {
+                sb.AppendLine($"### {type.Name} Template");
+                sb.AppendLine("```json");
+                sb.AppendLine(GenerateExampleJson(type));
+                sb.AppendLine("```");
+                sb.AppendLine();
+            }
         }
     }
 }
