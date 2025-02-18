@@ -1,127 +1,225 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Threading.Tasks;
 using System.Reflection;
-using CodeBuddy.Core.Models.Documentation;
+using System.Text;
 
 namespace CodeBuddy.Core.Implementation.Documentation
 {
     /// <summary>
-    /// Generates class diagrams and dependency graphs for the codebase
+    /// Generates PlantUML diagrams for code documentation
     /// </summary>
     public class DiagramGenerator
     {
         /// <summary>
-        /// Generates a PlantUML class diagram for a set of types
+        /// Generates a PlantUML class diagram for the given types
         /// </summary>
         public string GenerateClassDiagram(IEnumerable<Type> types)
         {
-            var diagram = new List<string>
-            {
-                "@startuml",
-                "skinparam classAttributeIconSize 0",
-                "skinparam classFontSize 12",
-                "skinparam classFontName Helvetica"
-            };
+            var sb = new StringBuilder();
+            sb.AppendLine("@startuml");
+            sb.AppendLine("skinparam classAttributeIconSize 0");
+            sb.AppendLine("skinparam classFontStyle bold");
+            sb.AppendLine();
 
-            foreach (var type in types)
+            foreach (var type in types.OrderBy(t => t.Namespace))
             {
-                // Add class/interface definition
+                // Skip compiler-generated types
+                if (type.Name.Contains("<")) continue;
+
                 if (type.IsInterface)
-                    diagram.Add($"interface {type.Name}");
-                else if (type.IsAbstract)
-                    diagram.Add($"abstract class {type.Name}");
-                else
-                    diagram.Add($"class {type.Name}");
-
-                // Add properties
-                foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
                 {
-                    diagram.Add($"  +{prop.Name}: {prop.PropertyType.Name}");
+                    GenerateInterfaceDiagram(type, sb);
                 }
-
-                // Add methods
-                foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+                else if (type.IsClass)
                 {
-                    if (!method.IsSpecialName) // Skip property accessors
-                    {
-                        var parameters = string.Join(", ", method.GetParameters().Select(p => $"{p.Name}: {p.ParameterType.Name}"));
-                        diagram.Add($"  +{method.Name}({parameters}): {method.ReturnType.Name}");
-                    }
+                    GenerateClassDiagram(type, sb);
                 }
-
-                diagram.Add("");
-
-                // Add inheritance
-                if (type.BaseType != null && type.BaseType != typeof(object))
+                else if (type.IsEnum)
                 {
-                    diagram.Add($"{type.BaseType.Name} <|-- {type.Name}");
-                }
-
-                // Add interface implementations
-                foreach (var iface in type.GetInterfaces())
-                {
-                    diagram.Add($"{iface.Name} <|.. {type.Name}");
+                    GenerateEnumDiagram(type, sb);
                 }
             }
 
-            diagram.Add("@enduml");
-            return string.Join("\n", diagram);
+            // Generate relationships
+            foreach (var type in types)
+            {
+                GenerateRelationships(type, sb);
+            }
+
+            sb.AppendLine("@enduml");
+            return sb.ToString();
         }
 
         /// <summary>
-        /// Generates a dependency graph in DOT format
+        /// Generates a PlantUML dependency graph for the given types
         /// </summary>
         public string GenerateDependencyGraph(IEnumerable<Type> types)
         {
-            var graph = new List<string>
+            var sb = new StringBuilder();
+            sb.AppendLine("digraph Dependencies {");
+            sb.AppendLine("  rankdir=LR;");
+            sb.AppendLine("  node [shape=box, style=filled, fillcolor=lightgray];");
+            sb.AppendLine();
+
+            var typesByNamespace = types
+                .GroupBy(t => t.Namespace ?? "Global")
+                .OrderBy(g => g.Key);
+
+            // Generate nodes
+            foreach (var ns in typesByNamespace)
             {
-                "digraph DependencyGraph {",
-                "  rankdir=LR;",
-                "  node [shape=box, style=filled, fillcolor=lightgray];",
-                "  edge [arrowhead=vee];"
-            };
+                sb.AppendLine($"  subgraph cluster_{SanitizeName(ns.Key)} {{");
+                sb.AppendLine($"    label = \"{ns.Key}\";");
+                
+                foreach (var type in ns.OrderBy(t => t.Name))
+                {
+                    var name = GetFullTypeName(type);
+                    sb.AppendLine($"    {SanitizeName(name)} [label=\"{name}\"];");
+                }
+                
+                sb.AppendLine("  }");
+            }
 
-            var dependencies = new HashSet<string>();
-
+            // Generate edges
             foreach (var type in types)
             {
-                // Add node
-                graph.Add($"  \"{type.Name}\" [label=\"{type.Name}\"];");
-
-                // Add dependencies from constructor parameters
-                var constructors = type.GetConstructors();
-                foreach (var ctor in constructors)
+                var dependencies = GetTypeDependencies(type);
+                var typeName = SanitizeName(GetFullTypeName(type));
+                
+                foreach (var dep in dependencies)
                 {
-                    foreach (var param in ctor.GetParameters())
-                    {
-                        var dep = $"  \"{param.ParameterType.Name}\" -> \"{type.Name}\"";
-                        if (!dependencies.Contains(dep))
-                        {
-                            dependencies.Add(dep);
-                            graph.Add(dep);
-                        }
-                    }
-                }
-
-                // Add dependencies from property types
-                foreach (var prop in type.GetProperties())
-                {
-                    if (!prop.PropertyType.IsPrimitive && prop.PropertyType != typeof(string))
-                    {
-                        var dep = $"  \"{prop.PropertyType.Name}\" -> \"{type.Name}\" [style=dotted]";
-                        if (!dependencies.Contains(dep))
-                        {
-                            dependencies.Add(dep);
-                            graph.Add(dep);
-                        }
-                    }
+                    var depName = SanitizeName(GetFullTypeName(dep));
+                    sb.AppendLine($"  {typeName} -> {depName};");
                 }
             }
 
-            graph.Add("}");
-            return string.Join("\n", graph);
+            sb.AppendLine("}");
+            return sb.ToString();
+        }
+
+        private void GenerateClassDiagram(Type type, StringBuilder sb)
+        {
+            var classModifier = type.IsAbstract ? "abstract" : "class";
+            sb.AppendLine($"{classModifier} {type.Name} {{");
+
+            // Properties
+            var properties = type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                .Where(p => !p.GetIndexParameters().Any());
+            foreach (var prop in properties)
+            {
+                sb.AppendLine($"  +{prop.PropertyType.Name} {prop.Name}");
+            }
+
+            // Methods
+            var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .Where(m => !m.IsSpecialName); // Exclude property accessors
+            foreach (var method in methods)
+            {
+                var parameters = string.Join(", ", method.GetParameters()
+                    .Select(p => $"{p.ParameterType.Name} {p.Name}"));
+                sb.AppendLine($"  +{method.ReturnType.Name} {method.Name}({parameters})");
+            }
+
+            sb.AppendLine("}");
+            sb.AppendLine();
+        }
+
+        private void GenerateInterfaceDiagram(Type type, StringBuilder sb)
+        {
+            sb.AppendLine($"interface {type.Name} {{");
+
+            var members = type.GetMembers(BindingFlags.Public | BindingFlags.Instance)
+                .Where(m => m.DeclaringType == type);
+            foreach (var member in members)
+            {
+                if (member is MethodInfo method)
+                {
+                    var parameters = string.Join(", ", method.GetParameters()
+                        .Select(p => $"{p.ParameterType.Name} {p.Name}"));
+                    sb.AppendLine($"  +{method.ReturnType.Name} {method.Name}({parameters})");
+                }
+                else if (member is PropertyInfo property)
+                {
+                    sb.AppendLine($"  +{property.PropertyType.Name} {property.Name}");
+                }
+            }
+
+            sb.AppendLine("}");
+            sb.AppendLine();
+        }
+
+        private void GenerateEnumDiagram(Type type, StringBuilder sb)
+        {
+            sb.AppendLine($"enum {type.Name} {{");
+            
+            var values = Enum.GetNames(type);
+            foreach (var value in values)
+            {
+                sb.AppendLine($"  {value}");
+            }
+
+            sb.AppendLine("}");
+            sb.AppendLine();
+        }
+
+        private void GenerateRelationships(Type type, StringBuilder sb)
+        {
+            if (type.BaseType != null && type.BaseType != typeof(object))
+            {
+                sb.AppendLine($"{type.Name} -up-|> {type.BaseType.Name}");
+            }
+
+            foreach (var iface in type.GetInterfaces())
+            {
+                sb.AppendLine($"{type.Name} .up.|> {iface.Name}");
+            }
+        }
+
+        private string GetFullTypeName(Type type)
+        {
+            var ns = type.Namespace ?? "Global";
+            return $"{ns}.{type.Name}";
+        }
+
+        private string SanitizeName(string name)
+        {
+            return name.Replace(".", "_").Replace("<", "_").Replace(">", "_");
+        }
+
+        private IEnumerable<Type> GetTypeDependencies(Type type)
+        {
+            var dependencies = new HashSet<Type>();
+
+            // Base type
+            if (type.BaseType != null && type.BaseType != typeof(object))
+            {
+                dependencies.Add(type.BaseType);
+            }
+
+            // Interfaces
+            foreach (var iface in type.GetInterfaces())
+            {
+                dependencies.Add(iface);
+            }
+
+            // Property types
+            foreach (var prop in type.GetProperties())
+            {
+                dependencies.Add(prop.PropertyType);
+            }
+
+            // Method return types and parameter types
+            foreach (var method in type.GetMethods())
+            {
+                dependencies.Add(method.ReturnType);
+                foreach (var param in method.GetParameters())
+                {
+                    dependencies.Add(param.ParameterType);
+                }
+            }
+
+            return dependencies.Where(t => t.Namespace?.StartsWith("CodeBuddy") == true);
         }
     }
 }
