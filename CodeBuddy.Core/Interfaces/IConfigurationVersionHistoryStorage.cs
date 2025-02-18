@@ -6,23 +6,15 @@ using CodeBuddy.Core.Models.Configuration;
 namespace CodeBuddy.Core.Interfaces
 {
     /// <summary>
-    /// Interface for managing application configuration with version history support
+    /// Interface for storing and retrieving configuration version history
     /// </summary>
-    public interface IConfigurationManager
+    public interface IConfigurationVersionHistoryStorage
     {
         /// <summary>
-        /// Updates the configuration with the specified changes and records the change history
+        /// Stores a new configuration version history entry
         /// </summary>
-        /// <param name="changes">Dictionary of configuration changes to apply</param>
-        /// <param name="reason">Optional reason for the changes</param>
-        /// <param name="migrationId">Optional migration ID if changes are part of a migration</param>
-        /// <param name="affectedComponents">Optional list of components affected by the changes</param>
-        /// <returns>True if changes were applied successfully, false otherwise</returns>
-        Task<bool> UpdateConfigurationAsync(
-            Dictionary<string, object> changes,
-            string reason = null,
-            string migrationId = null,
-            List<string> affectedComponents = null);
+        /// <param name="versionHistory">The version history entry to store</param>
+        Task StoreVersionAsync(ConfigurationVersionHistory versionHistory);
 
         /// <summary>
         /// Retrieves the configuration state at a specific point in time
@@ -32,19 +24,19 @@ namespace CodeBuddy.Core.Interfaces
         Task<Dictionary<string, object>> GetConfigurationAtTimeAsync(DateTime timestamp);
 
         /// <summary>
-        /// Rolls back the configuration to a specific version
+        /// Retrieves a specific version of the configuration by version ID
         /// </summary>
-        /// <param name="versionId">The version ID to roll back to</param>
-        /// <returns>True if rollback was successful, false otherwise</returns>
-        Task<bool> RollbackToVersionAsync(string versionId);
+        /// <param name="versionId">The version ID to retrieve</param>
+        /// <returns>The configuration version history entry</returns>
+        Task<ConfigurationVersionHistory> GetVersionAsync(string versionId);
 
         /// <summary>
-        /// Retrieves the configuration version history within a specified time range
+        /// Lists all configuration versions within a time range
         /// </summary>
         /// <param name="startTime">Start of the time range</param>
         /// <param name="endTime">End of the time range</param>
         /// <returns>List of configuration version history entries</returns>
-        Task<List<ConfigurationVersionHistory>> GetVersionHistoryAsync(DateTime startTime, DateTime endTime);
+        Task<List<ConfigurationVersionHistory>> ListVersionsAsync(DateTime startTime, DateTime endTime);
 
         /// <summary>
         /// Compares two configuration versions and returns the differences
@@ -53,5 +45,11 @@ namespace CodeBuddy.Core.Interfaces
         /// <param name="versionId2">Second version ID to compare</param>
         /// <returns>Dictionary of changes between the versions</returns>
         Task<Dictionary<string, ConfigurationValueChange>> CompareVersionsAsync(string versionId1, string versionId2);
+
+        /// <summary>
+        /// Cleans up old configuration history entries based on retention policy
+        /// </summary>
+        /// <param name="retentionDays">Number of days to retain history</param>
+        Task CleanupHistoryAsync(int retentionDays);
     }
 }
