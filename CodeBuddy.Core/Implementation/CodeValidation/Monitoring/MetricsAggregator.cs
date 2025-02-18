@@ -1,256 +1,185 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Threading;
+using System.Linq;
+using System.Threading.Tasks;
 using CodeBuddy.Core.Models;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation.Monitoring
 {
-    public interface IMetricsAggregator
-    {
-        void RecordMiddlewareExecution(string middleware, bool success, TimeSpan duration);
-        void RecordCircuitBreakerStatus(string middleware, bool isOpen);
-        void RecordRetryAttempt(string middleware);
-        void RecordResourceUtilization(ResourceMetrics metrics);
-        Task PublishMetricsAsync(string nodeId, ResourceMetrics metrics);
-        MetricsSummary GetCurrentMetrics();
-        IEnumerable<MetricsSummary> GetHistoricalMetrics(TimeSpan timeWindow);
-        Task<ClusterMetrics> GetClusterMetricsAsync();
-        Task<Dictionary<string, ResourceMetrics>> GetNodeMetricsAsync();
-    }
-
     public class MetricsAggregator : IMetricsAggregator
     {
-        private readonly ConcurrentDictionary<string, MiddlewareMetrics> _middlewareMetrics = new();
-        private readonly ConcurrentQueue<TimestampedMetrics> _historicalMetrics = new();
-        private readonly ConcurrentDictionary<string, ConcurrentQueue<TimestampedNodeMetrics>> _nodeMetrics = new();
-        private readonly Timer _aggregationTimer;
-        private readonly ValidationResilienceConfig _config;
-        private const int MetricsRetentionHours = 24;
+        private readonly ITimeSeriesStorage _timeSeriesStorage;
+        private readonly IResourceAnalytics _resourceAnalytics;
+        private readonly Dictionary<string, CircuitBreakerState> _circuitBreakerStates;
+        private readonly Dictionary<string, Queue<ExecutionRecord>> _executionHistory;
+        private readonly Dictionary<string, Queue<RetryRecord>> _retryHistory;
 
-        public MetricsAggregator()
+        public MetricsAggregator(
+            ITimeSeriesStorage timeSeriesStorage,
+            IResourceAnalytics resourceAnalytics)
         {
-            _aggregationTimer = new Timer(PruneHistoricalMetrics, null, TimeSpan.FromHours(1), TimeSpan.FromHours(1));
+            _timeSeriesStorage = timeSeriesStorage;
+            _resourceAnalytics = resourceAnalytics;
+            _circuitBreakerStates = new Dictionary<string, CircuitBreakerState>();
+            _executionHistory = new Dictionary<string, Queue<ExecutionRecord>>();
+            _retryHistory = new Dictionary<string, Queue<RetryRecord>>();
         }
 
-        public void RecordMiddlewareExecution(string middleware, bool success, TimeSpan duration)
+        public async Task<MiddlewareExecutionMetrics> GetMiddlewareExecutionMetricsAsync(string middlewareName)
         {
-            var metrics = _middlewareMetrics.GetOrAdd(middleware, _ => new MiddlewareMetrics());
-            if (success)
+            var history = await GetExecutionHistoryAsync(middlewareName);
+            var recentExecutions = history.Where(x => x.Timestamp >= DateTime.UtcNow.AddMinutes(-5));
+
+            return new MiddlewareExecutionMetrics
             {
-                Interlocked.Increment(ref metrics.SuccessCount);
-            }
-            else
-            {
-                Interlocked.Increment(ref metrics.FailureCount);
-            }
-            metrics.AddExecutionTime(duration);
-        }
-
-        public void RecordCircuitBreakerStatus(string middleware, bool isOpen)
-        {
-            var metrics = _middlewareMetrics.GetOrAdd(middleware, _ => new MiddlewareMetrics());
-            metrics.UpdateCircuitBreakerStatus(isOpen);
-        }
-
-        public void RecordRetryAttempt(string middleware)
-        {
-            var metrics = _middlewareMetrics.GetOrAdd(middleware, _ => new MiddlewareMetrics());
-            Interlocked.Increment(ref metrics.RetryCount);
-        }
-
-        public void RecordResourceUtilization(ResourceMetrics metrics)
-        {
-            var timestamp = DateTime.UtcNow;
-            _historicalMetrics.Enqueue(new TimestampedMetrics
-            {
-                Timestamp = timestamp,
-                Metrics = new MetricsSummary
-                {
-                    ResourceMetrics = metrics,
-                    MiddlewareMetrics = GetCurrentMiddlewareMetrics()
-                }
-            });
-        }
-
-        public MetricsSummary GetCurrentMetrics()
-        {
-            return new MetricsSummary
-            {
-                MiddlewareMetrics = GetCurrentMiddlewareMetrics(),
-                ResourceMetrics = GetLatestResourceMetrics()
+                TotalRequests = recentExecutions.Count(),
+                SuccessfulRequests = recentExecutions.Count(x => x.Success),
+                FailedRequests = recentExecutions.Count(x => !x.Success),
+                AverageExecutionTime = TimeSpan.FromMilliseconds(recentExecutions.Average(x => x.ExecutionTime.TotalMilliseconds)),
+                P95ExecutionTime = CalculatePercentile(recentExecutions.Select(x => x.ExecutionTime), 0.95),
+                P99ExecutionTime = CalculatePercentile(recentExecutions.Select(x => x.ExecutionTime), 0.99),
+                RequestsPerSecond = CalculateRequestsPerSecond(recentExecutions),
+                ConcurrentExecutions = recentExecutions.Count(x => x.EndTime == null)
             };
         }
 
-        public IEnumerable<MetricsSummary> GetHistoricalMetrics(TimeSpan timeWindow)
+        public async Task<CircuitBreakerMetrics> GetCircuitBreakerMetricsAsync(string middlewareName)
         {
-            var cutoff = DateTime.UtcNow - timeWindow;
-            return _historicalMetrics
-                .Where(m => m.Timestamp >= cutoff)
-                .Select(m => m.Metrics);
-        }
+            var state = await GetCircuitBreakerStateAsync(middlewareName);
+            var history = await GetCircuitBreakerHistoryAsync(middlewareName);
 
-        private void PruneHistoricalMetrics(object state)
-        {
-            var cutoff = DateTime.UtcNow.AddHours(-MetricsRetentionHours);
-            while (_historicalMetrics.TryPeek(out var metrics) && metrics.Timestamp < cutoff)
+            return new CircuitBreakerMetrics
             {
-                _historicalMetrics.TryDequeue(out _);
-            }
+                State = state,
+                LastStateChange = GetLastStateChange(history),
+                TripsLastHour = CountTripsInTimeRange(history, TimeSpan.FromHours(1)),
+                TripsLast24Hours = CountTripsInTimeRange(history, TimeSpan.FromHours(24)),
+                AverageRecoveryTime = CalculateAverageRecoveryTime(history)
+            };
         }
 
-        private Dictionary<string, MiddlewareMetrics> GetCurrentMiddlewareMetrics()
+        public async Task<RetryMetrics> GetRetryMetricsAsync(string middlewareName)
         {
-            return _middlewareMetrics.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
-        }
+            var retries = await GetRetryHistoryAsync(middlewareName);
+            var patterns = AnalyzeRetryPatterns(retries);
 
-        private ResourceMetrics GetLatestResourceMetrics()
-        {
-            return _historicalMetrics.LastOrDefault()?.Metrics.ResourceMetrics ?? new ResourceMetrics();
-        }
-
-        public async Task PublishMetricsAsync(string nodeId, ResourceMetrics metrics)
-        {
-            if (string.IsNullOrEmpty(nodeId)) throw new ArgumentNullException(nameof(nodeId));
-            if (metrics == null) throw new ArgumentNullException(nameof(metrics));
-
-            var nodeQueue = _nodeMetrics.GetOrAdd(nodeId, _ => new ConcurrentQueue<TimestampedNodeMetrics>());
-            nodeQueue.Enqueue(new TimestampedNodeMetrics
+            return new RetryMetrics
             {
-                NodeId = nodeId,
-                Metrics = metrics,
-                Timestamp = DateTime.UtcNow
-            });
-
-            // Prune old metrics
-            while (nodeQueue.TryPeek(out var oldMetrics) && 
-                   oldMetrics.Timestamp < DateTime.UtcNow - TimeSpan.FromHours(MetricsRetentionHours))
-            {
-                nodeQueue.TryDequeue(out _);
-            }
-
-            await Task.CompletedTask;
+                TotalRetryAttempts = retries.Sum(x => x.AttemptCount),
+                SuccessfulRetries = retries.Count(x => x.Successful),
+                RetryPatterns = patterns
+            };
         }
 
-        public async Task<ClusterMetrics> GetClusterMetricsAsync()
+        public async Task<List<FailureCategory>> GetTopFailureCategoriesAsync(string middlewareName)
         {
-            var nodeMetrics = new Dictionary<string, ResourceMetrics>();
-            var aggregatedMetrics = new ResourceMetrics();
-            var activeNodes = 0;
-
-            foreach (var node in _nodeMetrics)
-            {
-                var latestMetrics = node.Value.LastOrDefault();
-                if (latestMetrics != null && 
-                    latestMetrics.Timestamp > DateTime.UtcNow - _config.NodeHealthCheckInterval)
+            var failures = await GetFailureHistoryAsync(middlewareName);
+            return failures
+                .GroupBy(x => x.Category)
+                .Select(g => new FailureCategory
                 {
-                    nodeMetrics[node.Key] = latestMetrics.Metrics;
-                    aggregatedMetrics.CpuUsagePercent += latestMetrics.Metrics.CpuUsagePercent;
-                    aggregatedMetrics.MemoryUsageMB += latestMetrics.Metrics.MemoryUsageMB;
-                    aggregatedMetrics.DiskIoMBPS += latestMetrics.Metrics.DiskIoMBPS;
-                    aggregatedMetrics.ActiveThreads += latestMetrics.Metrics.ActiveThreads;
-                    activeNodes++;
-                }
-            }
-
-            if (activeNodes > 0)
-            {
-                aggregatedMetrics.CpuUsagePercent /= activeNodes;
-                aggregatedMetrics.MemoryUsageMB /= activeNodes;
-                aggregatedMetrics.DiskIoMBPS /= activeNodes;
-            }
-
-            return await Task.FromResult(new ClusterMetrics
-            {
-                NodeMetrics = nodeMetrics,
-                AggregatedMetrics = aggregatedMetrics,
-                ActiveNodes = activeNodes,
-                TotalNodes = _nodeMetrics.Count,
-                Timestamp = DateTime.UtcNow
-            });
+                    Category = g.Key,
+                    Count = g.Count(),
+                    Description = g.First().Description,
+                    CommonErrors = g.Select(x => x.ErrorMessage)
+                                  .GroupBy(x => x)
+                                  .OrderByDescending(x => x.Count())
+                                  .Take(5)
+                                  .Select(x => x.Key)
+                                  .ToList()
+                })
+                .OrderByDescending(x => x.Count)
+                .Take(10)
+                .ToList();
         }
 
-        public async Task<Dictionary<string, ResourceMetrics>> GetNodeMetricsAsync()
+        public async Task<SystemWideExecutionMetrics> GetSystemWideMetricsAsync()
         {
-            var metrics = new Dictionary<string, ResourceMetrics>();
-            
-            foreach (var node in _nodeMetrics)
-            {
-                var latestMetrics = node.Value.LastOrDefault();
-                if (latestMetrics != null && 
-                    latestMetrics.Timestamp > DateTime.UtcNow - _config.NodeHealthCheckInterval)
-                {
-                    metrics[node.Key] = latestMetrics.Metrics;
-                }
-            }
+            var allMetrics = await Task.WhenAll(
+                _executionHistory.Keys.Select(GetMiddlewareExecutionMetricsAsync));
 
-            return await Task.FromResult(metrics);
+            return new SystemWideExecutionMetrics
+            {
+                SuccessRate = CalculateOverallSuccessRate(allMetrics),
+                AverageResponseTime = CalculateOverallAverageResponseTime(allMetrics),
+                ActiveValidations = allMetrics.Sum(x => x.ConcurrentExecutions)
+            };
         }
 
-        private class TimestampedMetrics
+        public async Task<Dictionary<string, CircuitBreakerState>> GetCircuitBreakerStatesAsync()
+        {
+            return _circuitBreakerStates;
+        }
+
+        // Helper methods for data storage and retrieval
+        private async Task<IEnumerable<ExecutionRecord>> GetExecutionHistoryAsync(string middlewareName)
+        {
+            if (!_executionHistory.ContainsKey(middlewareName))
+            {
+                _executionHistory[middlewareName] = new Queue<ExecutionRecord>();
+            }
+            return _executionHistory[middlewareName];
+        }
+
+        private async Task<IEnumerable<RetryRecord>> GetRetryHistoryAsync(string middlewareName)
+        {
+            if (!_retryHistory.ContainsKey(middlewareName))
+            {
+                _retryHistory[middlewareName] = new Queue<RetryRecord>();
+            }
+            return _retryHistory[middlewareName];
+        }
+
+        // Helper methods for calculations
+        private TimeSpan CalculatePercentile(IEnumerable<TimeSpan> values, double percentile)
+        {
+            var sortedValues = values.OrderBy(x => x.TotalMilliseconds).ToList();
+            var index = (int)Math.Ceiling(percentile * (sortedValues.Count - 1));
+            return sortedValues[index];
+        }
+
+        private int CalculateRequestsPerSecond(IEnumerable<ExecutionRecord> executions)
+        {
+            var recentExecutions = executions.Where(x => x.Timestamp >= DateTime.UtcNow.AddSeconds(-1));
+            return recentExecutions.Count();
+        }
+
+        private double CalculateOverallSuccessRate(IEnumerable<MiddlewareExecutionMetrics> metrics)
+        {
+            var totalRequests = metrics.Sum(x => x.TotalRequests);
+            var successfulRequests = metrics.Sum(x => x.SuccessfulRequests);
+            return totalRequests > 0 ? (double)successfulRequests / totalRequests : 0;
+        }
+
+        private TimeSpan CalculateOverallAverageResponseTime(IEnumerable<MiddlewareExecutionMetrics> metrics)
+        {
+            var weightedSum = metrics.Sum(x => x.AverageExecutionTime.TotalMilliseconds * x.TotalRequests);
+            var totalRequests = metrics.Sum(x => x.TotalRequests);
+            return TimeSpan.FromMilliseconds(totalRequests > 0 ? weightedSum / totalRequests : 0);
+        }
+
+        // Additional helper classes
+        private class ExecutionRecord
         {
             public DateTime Timestamp { get; set; }
-            public MetricsSummary Metrics { get; set; }
+            public DateTime? EndTime { get; set; }
+            public TimeSpan ExecutionTime => EndTime.HasValue ? EndTime.Value - Timestamp : TimeSpan.Zero;
+            public bool Success { get; set; }
         }
-    }
 
-    public class MiddlewareMetrics
-    {
-        public long SuccessCount;
-        public long FailureCount;
-        public long RetryCount;
-        private bool _circuitBreakerOpen;
-        private readonly ConcurrentQueue<double> _executionTimes = new();
-        private const int MaxStoredExecutionTimes = 1000;
-
-        public void AddExecutionTime(TimeSpan duration)
+        private class RetryRecord
         {
-            _executionTimes.Enqueue(duration.TotalMilliseconds);
-            while (_executionTimes.Count > MaxStoredExecutionTimes)
-            {
-                _executionTimes.TryDequeue(out _);
-            }
+            public DateTime Timestamp { get; set; }
+            public int AttemptCount { get; set; }
+            public bool Successful { get; set; }
         }
 
-        public void UpdateCircuitBreakerStatus(bool isOpen)
+        private class FailureRecord
         {
-            _circuitBreakerOpen = isOpen;
+            public string Category { get; set; }
+            public string Description { get; set; }
+            public string ErrorMessage { get; set; }
+            public DateTime Timestamp { get; set; }
         }
-
-        public double AverageExecutionTime => _executionTimes.Any() ? _executionTimes.Average() : 0;
-        public bool CircuitBreakerOpen => _circuitBreakerOpen;
-    }
-
-    public class MetricsSummary
-    {
-        public Dictionary<string, MiddlewareMetrics> MiddlewareMetrics { get; set; }
-        public ResourceMetrics ResourceMetrics { get; set; }
-    }
-
-    public class ResourceMetrics
-    {
-        public double CpuUsagePercent { get; set; }
-        public double MemoryUsageMB { get; set; }
-        public double DiskIoMBPS { get; set; }
-        public int ActiveThreads { get; set; }
-        public double CpuUsage => CpuUsagePercent;
-        public double MemoryUsage => MemoryUsageMB;
-        public double DiskIoUsage => DiskIoMBPS;
-    }
-
-    public class ClusterMetrics
-    {
-        public Dictionary<string, ResourceMetrics> NodeMetrics { get; set; }
-        public ResourceMetrics AggregatedMetrics { get; set; }
-        public int ActiveNodes { get; set; }
-        public int TotalNodes { get; set; }
-        public DateTime Timestamp { get; set; }
-    }
-
-    public class TimestampedNodeMetrics
-    {
-        public string NodeId { get; set; }
-        public ResourceMetrics Metrics { get; set; }
-        public DateTime Timestamp { get; set; }
     }
 }
