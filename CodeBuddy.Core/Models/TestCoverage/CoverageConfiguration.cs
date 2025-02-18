@@ -6,9 +6,60 @@ namespace CodeBuddy.Core.Models.TestCoverage;
 public class CoverageConfiguration
 {
     public double OverallThreshold { get; set; } = 80.0;
-    public Dictionary<string, double> ModuleThresholds { get; set; } = new();
-    public Dictionary<string, CoverageTypeRequirements> CodeTypeThresholds { get; set; } = new();
-    public List<string> ExclusionPatterns { get; set; } = new();
+    public Dictionary<string, double> ModuleThresholds { get; set; } = new()
+    {
+        { "Core", 90.0 },
+        { "CLI", 85.0 },
+        { "Plugins", 80.0 },
+        { "Utilities", 75.0 }
+    };
+
+    public Dictionary<string, CoverageTypeRequirements> CodeTypeThresholds { get; set; } = new()
+    {
+        {
+            "CriticalPath",
+            new CoverageTypeRequirements
+            {
+                MinimumOverallCoverage = 95.0,
+                MinimumBranchCoverage = 90.0,
+                MinimumStatementCoverage = 95.0,
+                RequirePublicApiCoverage = true,
+                RequireIntegrationPointsCoverage = true
+            }
+        },
+        {
+            "PublicAPI",
+            new CoverageTypeRequirements
+            {
+                MinimumOverallCoverage = 90.0,
+                MinimumBranchCoverage = 85.0,
+                MinimumStatementCoverage = 90.0,
+                RequirePublicApiCoverage = true,
+                RequireIntegrationPointsCoverage = true
+            }
+        },
+        {
+            "DataAccess",
+            new CoverageTypeRequirements
+            {
+                MinimumOverallCoverage = 85.0,
+                MinimumBranchCoverage = 80.0,
+                MinimumStatementCoverage = 85.0,
+                RequirePublicApiCoverage = false,
+                RequireIntegrationPointsCoverage = true
+            }
+        }
+    };
+
+    public List<string> ExclusionPatterns { get; set; } = new()
+    {
+        @"\\Generated\\",
+        @"\.Designer\.cs$",
+        @"\\obj\\",
+        @"\\bin\\",
+        @"\.g\.cs$"
+    };
+
     public ValidationRules ValidationRules { get; set; } = new();
     
     public double GetThresholdForModule(string moduleName)

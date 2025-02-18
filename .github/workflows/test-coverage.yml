@@ -1,0 +1,77 @@
+name: Test Coverage Analysis
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: '8.0.x'
+    
+    - name: Restore dependencies
+      run: dotnet restore
+    
+    - name: Build
+      run: dotnet build --no-restore
+    
+    - name: Run tests with coverage
+      run: |
+        dotnet test --no-build --verbosity normal \
+          /p:CollectCoverage=true \
+          /p:CoverletOutputFormat=cobertura \
+          /p:CoverletOutput=./TestResults/Coverage/
+    
+    - name: Generate coverage report
+      run: |
+        dotnet tool install -g dotnet-reportgenerator-globaltool
+        reportgenerator \
+          -reports:./TestResults/Coverage/coverage.cobertura.xml \
+          -targetdir:./TestResults/CoverageReport \
+          -reporttypes:Html;JsonSummary;Badges
+    
+    - name: Upload coverage report
+      uses: actions/upload-artifact@v3
+      with:
+        name: coverage-report
+        path: ./TestResults/CoverageReport
+    
+    - name: Check coverage thresholds
+      run: |
+        COVERAGE=$(jq -r '.summary.lineCoverage' ./TestResults/CoverageReport/Summary.json)
+        THRESHOLD=80
+        if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
+          echo "Coverage ($COVERAGE%) is below threshold ($THRESHOLD%)"
+          exit 1
+        fi
+    
+    - name: Update coverage badge
+      if: github.ref == 'refs/heads/master'
+      uses: schneegans/dynamic-badges-action@v1.6.0
+      with:
+        auth: ${{ secrets.GIST_SECRET }}
+        gistID: coverage-badge-gist-id
+        filename: coverage.json
+        label: coverage
+        message: ${{ env.COVERAGE }}%
+        color: ${{ env.COVERAGE >= 90 && 'brightgreen' || env.COVERAGE >= 80 && 'green' || env.COVERAGE >= 70 && 'yellow' || 'red' }}
+    
+    - name: Publish coverage report
+      if: github.ref == 'refs/heads/master'
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./TestResults/CoverageReport
+        destination_dir: coverage
