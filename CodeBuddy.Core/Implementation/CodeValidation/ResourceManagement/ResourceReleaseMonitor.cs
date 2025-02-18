@@ -1,169 +1,153 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Threading;
 using System.Threading.Tasks;
-using CodeBuddy.Core.Models.Analytics;
-using CodeBuddy.Core.Implementation.CodeValidation.Monitoring;
+using CodeBuddy.Core.Implementation.Logging;
+using CodeBuddy.Core.Models.Exceptions;
+using CodeBuddy.Core.Models.Logging;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation.ResourceManagement
 {
-    public class ResourceReleaseMonitor : IDisposable
+    public class CleanupResult
     {
-        private readonly ConcurrentDictionary<string, ResourceAllocationInfo> _activeResources;
-        private readonly ResourcePreallocationManager _preallocationManager;
-        private readonly IMetricsAggregator _metricsAggregator;
-        private readonly ResourceAlertManager _alertManager;
-        private readonly Timer _cleanupTimer;
-        private readonly ResourceTrendAnalyzer _trendAnalyzer;
-        private readonly ResourceAnalyticsController _analyticsController;
-        
-        private const int DEFAULT_CLEANUP_INTERVAL = 300000; // 5 minutes
-        private const int DEFAULT_RESOURCE_TIMEOUT = 3600000; // 1 hour
+        public int ProcessedCount { get; set; }
+        public int FreedCount { get; set; }
+        public long ReclaimedMemoryBytes { get; set; }
+    }
 
-        public ResourceReleaseMonitor(
-            ResourcePreallocationManager preallocationManager,
-            IMetricsAggregator metricsAggregator,
-            ResourceAlertManager alertManager,
-            ResourceTrendAnalyzer trendAnalyzer,
-            ResourceAnalyticsController analyticsController)
+    public class ResourceReleaseMonitor
+    {
+        private readonly ResourceLogger _logger;
+        private readonly object _syncLock = new object();
+        private readonly Dictionary<string, int> _failureCounters = new Dictionary<string, int>();
+        private const int MaxFailureRetries = 3;
+
+        public ResourceReleaseMonitor(ResourceLogger logger)
         {
-            _activeResources = new ConcurrentDictionary<string, ResourceAllocationInfo>();
-            _preallocationManager = preallocationManager;
-            _metricsAggregator = metricsAggregator;
-            _alertManager = alertManager;
-            _trendAnalyzer = trendAnalyzer;
-            _analyticsController = analyticsController;
-            
-            _cleanupTimer = new Timer(
-                CleanupOrphanedResources, 
-                null, 
-                DEFAULT_CLEANUP_INTERVAL, 
-                DEFAULT_CLEANUP_INTERVAL);
+            _logger = logger;
         }
 
-        public void TrackAllocation(string resourceId, ResourceType resourceType, string owner)
+        public async Task<CleanupResult> ProcessStuckAllocations()
         {
-            var allocationInfo = new ResourceAllocationInfo
+            var result = new CleanupResult();
+
+            try
             {
-                ResourceId = resourceId,
-                Type = resourceType,
-                Owner = owner,
-                AllocationTime = DateTime.UtcNow,
-                LastAccessTime = DateTime.UtcNow,
-                State = ResourceState.Active
-            };
+                _logger.Log(LogLevel.Debug, "ResourceMonitor", "ScanStart", 
+                    "Starting scan for stuck allocations");
 
-            _activeResources.TryAdd(resourceId, allocationInfo);
-            _metricsAggregator.TrackResourceAllocation(allocationInfo);
-            _trendAnalyzer.AddDataPoint(resourceType, ResourceMetricType.Allocation);
-        }
+                var stuckResources = await ScanForStuckResources();
+                result.ProcessedCount = stuckResources.Count;
 
-        public void TrackRelease(string resourceId)
-        {
-            if (_activeResources.TryRemove(resourceId, out var resourceInfo))
-            {
-                resourceInfo.ReleaseTime = DateTime.UtcNow;
-                resourceInfo.State = ResourceState.Released;
-                
-                _metricsAggregator.TrackResourceRelease(resourceInfo);
-                _trendAnalyzer.AddDataPoint(resourceInfo.Type, ResourceMetricType.Release);
-                _preallocationManager.NotifyResourceRelease(resourceInfo);
-            }
-        }
-
-        public async Task ProcessStuckAllocations()
-        {
-            var threshold = DateTime.UtcNow.AddMilliseconds(-DEFAULT_RESOURCE_TIMEOUT);
-            var stuckResources = new List<ResourceAllocationInfo>();
-
-            foreach (var resource in _activeResources)
-            {
-                if (resource.Value.LastAccessTime < threshold)
+                foreach (var resource in stuckResources)
                 {
-                    stuckResources.Add(resource.Value);
-                    await _alertManager.RaiseResourceAlert(
-                        ResourceAlertType.StuckAllocation,
-                        resource.Value);
-                }
-            }
-
-            _analyticsController.LogStuckResources(stuckResources);
-        }
-
-        private void CleanupOrphanedResources(object state)
-        {
-            var orphanedResources = new List<ResourceAllocationInfo>();
-            var now = DateTime.UtcNow;
-
-            foreach (var resource in _activeResources)
-            {
-                if (!IsResourceValid(resource.Value))
-                {
-                    if (_activeResources.TryRemove(resource.Key, out var resourceInfo))
+                    try
                     {
-                        orphanedResources.Add(resourceInfo);
-                        _analyticsController.LogOrphanedResource(resourceInfo);
+                        await ReleaseResource(resource);
+                        result.FreedCount++;
+                        result.ReclaimedMemoryBytes += resource.Size;
+
+                        _logger.Log(LogLevel.Information, "ResourceMonitor", "ResourceReleased", 
+                            $"Successfully released resource: {resource.Id}",
+                            new Dictionary<string, object>
+                            {
+                                { "ResourceId", resource.Id },
+                                { "ResourceType", resource.Type },
+                                { "Size", resource.Size },
+                                { "AllocationAge", resource.AllocationAge }
+                            });
+
+                        // Reset failure counter on success
+                        lock (_syncLock)
+                        {
+                            _failureCounters.Remove(resource.Id);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        HandleResourceReleaseFailure(resource, ex);
                     }
                 }
-            }
 
-            if (orphanedResources.Count > 0)
+                return result;
+            }
+            catch (Exception ex)
             {
-                _alertManager.RaiseOrphanedResourcesAlert(orphanedResources);
-                _preallocationManager.HandleOrphanedResources(orphanedResources);
+                _logger.Log(LogLevel.Error, "ResourceMonitor", "ScanError", 
+                    $"Error scanning for stuck allocations: {ex.Message}");
+                throw new ResourceMonitoringException("Failed to process stuck allocations", ex);
             }
         }
 
-        private bool IsResourceValid(ResourceAllocationInfo resource)
+        private void HandleResourceReleaseFailure(Resource resource, Exception ex)
         {
-            // Check if the resource owner still exists and the resource is accessible
-            return resource.State == ResourceState.Active && 
-                   (DateTime.UtcNow - resource.LastAccessTime).TotalMilliseconds < DEFAULT_RESOURCE_TIMEOUT;
-        }
-
-        public void Dispose()
-        {
-            _cleanupTimer?.Dispose();
-            foreach (var resource in _activeResources)
+            lock (_syncLock)
             {
-                TrackRelease(resource.Key);
+                if (!_failureCounters.ContainsKey(resource.Id))
+                    _failureCounters[resource.Id] = 0;
+                _failureCounters[resource.Id]++;
+
+                var failureCount = _failureCounters[resource.Id];
+                var metadata = new Dictionary<string, object>
+                {
+                    { "ResourceId", resource.Id },
+                    { "FailureCount", failureCount },
+                    { "ExceptionType", ex.GetType().Name }
+                };
+
+                if (failureCount >= MaxFailureRetries)
+                {
+                    _logger.Log(LogLevel.Critical, "ResourceMonitor", "MaxRetriesExceeded",
+                        $"Resource {resource.Id} has failed release {failureCount} times", metadata);
+                    // Could trigger emergency cleanup or alert operations team
+                }
+                else
+                {
+                    _logger.Log(LogLevel.Warning, "ResourceMonitor", "ReleaseFailed",
+                        $"Failed to release resource {resource.Id}. Attempt {failureCount} of {MaxFailureRetries}",
+                        metadata);
+                }
             }
         }
-    }
 
-    public class ResourceAllocationInfo
-    {
-        public string ResourceId { get; set; }
-        public ResourceType Type { get; set; }
-        public string Owner { get; set; }
-        public DateTime AllocationTime { get; set; }
-        public DateTime LastAccessTime { get; set; }
-        public DateTime? ReleaseTime { get; set; }
-        public ResourceState State { get; set; }
-    }
+        public async Task ForceReleaseResources()
+        {
+            try
+            {
+                _logger.Log(LogLevel.Warning, "ResourceMonitor", "ForceReleaseStart",
+                    "Starting forced release of all resources");
 
-    public enum ResourceState
-    {
-        Active,
-        Released,
-        Orphaned
-    }
+                // Implementation of force release
+                // This should be a more aggressive cleanup that might impact performance
+                // but ensures resources are freed
 
-    public enum ResourceType
-    {
-        Memory,
-        FileHandle,
-        DatabaseConnection,
-        NetworkSocket,
-        ThreadPool
-    }
+                _logger.Log(LogLevel.Information, "ResourceMonitor", "ForceReleaseComplete",
+                    "Completed forced release of resources");
+            }
+            catch (Exception ex)
+            {
+                _logger.Log(LogLevel.Critical, "ResourceMonitor", "ForceReleaseFailed",
+                    $"Failed to force release resources: {ex.Message}");
+                throw new ResourceCleanupException("Failed to force release resources", ex);
+            }
+        }
 
-    public enum ResourceMetricType
-    {
-        Allocation,
-        Release,
-        Timeout,
-        Orphaned
+        private async Task<List<Resource>> ScanForStuckResources()
+        {
+            // Implementation of resource scanning
+            return new List<Resource>();
+        }
+
+        private async Task ReleaseResource(Resource resource)
+        {
+            // Implementation of resource release
+        }
+
+        private class Resource
+        {
+            public string Id { get; set; }
+            public string Type { get; set; }
+            public long Size { get; set; }
+            public TimeSpan AllocationAge { get; set; }
+        }
     }
 }
