@@ -19,6 +19,7 @@ public class ValidationPipeline
     private readonly IResourceAlertManager _alertManager;
     private readonly IResourceAnalytics _resourceAnalytics;
     private readonly IValidationCache _validationCache;
+    private readonly MiddlewareMetricsDashboard _middlewareMetricsDashboard;
     
     // Resource throttling state
     private readonly SemaphoreSlim _validationThrottle;
@@ -35,7 +36,8 @@ public class ValidationPipeline
         IResourceAlertManager alertManager,
         IResourceAnalytics resourceAnalytics,
         IValidationCache validationCache,
-        ITestCoverageGenerator testCoverageGenerator)
+        ITestCoverageGenerator testCoverageGenerator,
+        MiddlewareMetricsDashboard middlewareMetricsDashboard)
     {
         _logger = logger;
         _middleware = new List<IValidationMiddleware>();
@@ -47,6 +49,7 @@ public class ValidationPipeline
         _resourceAnalytics = resourceAnalytics;
         _validationCache = validationCache;
         TestCoverageGenerator = testCoverageGenerator;
+        _middlewareMetricsDashboard = middlewareMetricsDashboard;
         
         // Initialize resource throttling
         _validationThrottle = new SemaphoreSlim(config.MaxConcurrentValidations);
@@ -210,6 +213,11 @@ public class ValidationPipeline
                         var duration = DateTime.UtcNow - startTime;
                         RecordSuccess(middleware.Name, duration);
                         _metricsAggregator.RecordMiddlewareExecution(middleware.Name, true, duration);
+                        await _middlewareMetricsDashboard.RecordMiddlewareExecution(
+                            middleware.Name,
+                            duration,
+                            true,
+                            attempts);
                         
                         return result;
                     }
@@ -219,6 +227,11 @@ public class ValidationPipeline
                         var duration = DateTime.UtcNow - startTime;
                         var failure = RecordFailure(middleware.Name, ex);
                         _metricsAggregator.RecordMiddlewareExecution(middleware.Name, false, duration);
+                        await _middlewareMetricsDashboard.RecordMiddlewareExecution(
+                            middleware.Name,
+                            duration,
+                            false,
+                            attempts);
                         _metricsAggregator.RecordRetryAttempt(middleware.Name);
                         ctx.Result.FailedMiddleware.Add(failure);
 
@@ -327,6 +340,7 @@ public class ValidationPipeline
                     s.IsOpen = true;
                     s.ResetTime = DateTime.UtcNow.Add(_config.CircuitBreakerResetTime);
                     _metricsAggregator.RecordCircuitBreakerStatus(middlewareName, true);
+                    _middlewareMetricsDashboard.UpdateCircuitBreakerStatus(middlewareName, true).Wait();
                 }
                 return s;
             });
@@ -591,6 +605,14 @@ public class ValidationPipeline
             [ResourceMetricType.Memory] = metrics.MemoryUsageMB,
             [ResourceMetricType.DiskIO] = metrics.DiskIoMBPS
         }, "ValidationPipeline");
+
+        // Update middleware dashboard with resource metrics
+        await _middlewareMetricsDashboard.UpdateResourceMetrics("ValidationPipeline", new ResourceMetrics
+        {
+            CpuUsage = metrics.CpuUsagePercent,
+            MemoryUsage = metrics.MemoryUsageMB * 1024 * 1024, // Convert MB to bytes
+            ThreadCount = metrics.ActiveThreads
+        });
 
         // Store metrics in analytics system
         await _resourceAnalytics.StoreResourceUsageDataAsync(new ResourceUsageData
