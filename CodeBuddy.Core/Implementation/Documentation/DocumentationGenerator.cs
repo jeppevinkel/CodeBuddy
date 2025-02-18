@@ -21,7 +21,7 @@ namespace CodeBuddy.Core.Implementation.Documentation
         private readonly UsageExampleGenerator _exampleGenerator;
         private readonly XmlDocumentationParser _xmlParser;
         private readonly CodeExampleValidator _exampleValidator;
-        private readonly DocumentationAnalyzer _docAnalyzer;
+        private readonly DocumentationCoverageAnalyzer _docAnalyzer;
         private readonly CrossReferenceGenerator _crossRefGenerator;
 
         public DocumentationGenerator(
@@ -36,7 +36,7 @@ namespace CodeBuddy.Core.Implementation.Documentation
             _exampleGenerator = new UsageExampleGenerator(pluginManager, configManager, fileOps);
             _xmlParser = new XmlDocumentationParser();
             _exampleValidator = new CodeExampleValidator();
-            _docAnalyzer = new DocumentationAnalyzer();
+            _docAnalyzer = new DocumentationCoverageAnalyzer();
             _crossRefGenerator = new CrossReferenceGenerator();
         }
 
@@ -234,48 +234,54 @@ namespace CodeBuddy.Core.Implementation.Documentation
             return examples;
         }
 
-        public async Task<DocumentationValidationResult> ValidateDocumentationAsync()
+        /// <summary>
+        /// Validates the documentation coverage and quality for the entire codebase
+        /// </summary>
+        /// <param name="requirements">Optional custom documentation requirements</param>
+        /// <returns>A detailed validation result</returns>
+        public async Task<DocumentationValidationResult> ValidateDocumentationAsync(DocumentationRequirements requirements = null)
         {
             var result = new DocumentationValidationResult();
             
             // Analyze XML documentation coverage
-            var coverageResult = await AnalyzeDocumentationCoverageAsync();
-            result.Coverage = coverageResult.Coverage;
+            var coverageReport = await _docAnalyzer.AnalyzeCoverageAsync(
+                AppDomain.CurrentDomain.GetAssemblies().Where(a => a.FullName.StartsWith("CodeBuddy")));
+            result.Coverage = coverageReport.OverallCoverage;
+            result.Issues.AddRange(coverageReport.Issues);
+            result.Recommendations.AddRange(coverageReport.Recommendations);
 
             // Validate code examples
             var examples = await ExtractCodeExamplesAsync();
-            foreach (var example in examples)
-            {
-                var validation = await _exampleValidator.ValidateExample(example);
-                if (!validation.IsValid)
+            var exampleValidations = await Task.WhenAll(
+                examples.Select(async example =>
                 {
-                    result.Issues.AddRange(validation.Issues.Select(i => new DocumentationIssue
+                    var validation = await _exampleValidator.ValidateExample(example);
+                    if (!validation.IsValid)
                     {
-                        Component = example.Title,
-                        IssueType = "InvalidExample",
-                        Description = i,
-                        Severity = IssueSeverity.Error
-                    }));
-                }
-            }
+                        return validation.Issues.Select(i => new DocumentationIssue
+                        {
+                            Component = example.Title,
+                            IssueType = "InvalidExample",
+                            Description = i,
+                            Severity = IssueSeverity.Error
+                        });
+                    }
+                    return Enumerable.Empty<DocumentationIssue>();
+                }));
+            result.Issues.AddRange(exampleValidations.SelectMany(i => i));
 
             // Validate cross-references
             var crossRefs = await GenerateCrossReferencesAsync();
-            foreach (var issue in crossRefs.Issues)
+            result.Issues.AddRange(crossRefs.Issues.Select(issue => new DocumentationIssue
             {
-                result.Issues.Add(new DocumentationIssue
-                {
-                    Component = issue.Component,
-                    IssueType = "InvalidCrossReference",
-                    Description = issue.Description,
-                    Severity = IssueSeverity.Warning
-                });
-            }
+                Component = issue.Component,
+                IssueType = "InvalidCrossReference",
+                Description = issue.Description,
+                Severity = IssueSeverity.Warning
+            }));
 
-            // Add recommendations
-            result.Recommendations.AddRange(_docAnalyzer.GenerateRecommendations(result.Issues));
-
-            result.IsValid = !result.Issues.Any(i => i.Severity == IssueSeverity.Error);
+            result.IsValid = coverageReport.MeetsThreshold && 
+                            !result.Issues.Any(i => i.Severity == IssueSeverity.Error);
             return result;
         }
 
@@ -285,10 +291,19 @@ namespace CodeBuddy.Core.Implementation.Documentation
                 .Where(a => a.FullName.StartsWith("CodeBuddy")));
         }
 
-        public async Task<DocumentationCoverageResult> AnalyzeDocumentationCoverageAsync()
+        /// <summary>
+        /// Analyzes documentation coverage for the entire codebase
+        /// </summary>
+        /// <param name="requirements">Optional custom documentation requirements</param>
+        /// <returns>A detailed coverage report</returns>
+        public async Task<DocumentationCoverageReport> AnalyzeDocumentationCoverageAsync(
+            DocumentationRequirements requirements = null)
         {
-            return await _docAnalyzer.AnalyzeCoverage(AppDomain.CurrentDomain.GetAssemblies()
-                .Where(a => a.FullName.StartsWith("CodeBuddy")));
+            var analyzer = requirements != null ? 
+                new DocumentationCoverageAnalyzer(requirements) : _docAnalyzer;
+
+            return await analyzer.AnalyzeCoverageAsync(
+                AppDomain.CurrentDomain.GetAssemblies().Where(a => a.FullName.StartsWith("CodeBuddy")));
         }
 
         public async Task<ResourcePatternDocumentation> GenerateResourcePatternsAsync()
