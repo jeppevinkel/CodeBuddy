@@ -4,6 +4,19 @@ namespace CodeBuddy.Core.Models;
 
 public class ValidationResilienceConfig
 {
+    // Distributed Monitoring Configuration
+    public bool EnableDistributedMonitoring { get; set; } = true;
+    public TimeSpan NodeSyncInterval { get; set; } = TimeSpan.FromSeconds(5);
+    public int MinHealthyNodes { get; set; } = 2;
+    public double ClusterWideCpuThreshold { get; set; } = 75.0;
+    public double ClusterWideMemoryThreshold { get; set; } = 80.0;
+    public int MaxNodesInCluster { get; set; } = 10;
+    public TimeSpan NodeHealthCheckInterval { get; set; } = TimeSpan.FromSeconds(30);
+    public int NodeFailureThreshold { get; set; } = 3;
+    public TimeSpan FailoverGracePeriod { get; set; } = TimeSpan.FromMinutes(1);
+    public bool EnableAutomaticFailover { get; set; } = true;
+    public LoadBalancingStrategy LoadBalancingStrategy { get; set; } = LoadBalancingStrategy.ResourceAware;
+    
     // Resource Throttling Configuration
     public double MaxCpuThresholdPercent { get; set; } = 80.0;
     public double MaxMemoryThresholdMB { get; set; } = 1024.0; // 1GB
@@ -72,4 +85,13 @@ public enum LogLevel
     Warning,
     Error,
     Critical
+}
+
+public enum LoadBalancingStrategy
+{
+    RoundRobin,
+    ResourceAware,
+    LeastConnections,
+    WeightedResponse,
+    Predictive
 }
