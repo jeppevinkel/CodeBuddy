@@ -1,160 +1,103 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
-using CodeBuddy.Core.Models;
 using CodeBuddy.Core.Models.TestCoverage;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation.Coverage;
 
 public class CoverageDataCollector : ICoverageDataCollector
 {
-    private readonly ICoverageInstrumenter _instrumenter;
-    private readonly ICoverageStorage _storage;
+    private readonly ICodeInstrumentationEngine _instrumentationEngine;
+    private readonly ITestRunner _testRunner;
+    private readonly ICoverageTracker _coverageTracker;
 
     public CoverageDataCollector(
-        ICoverageInstrumenter instrumenter,
-        ICoverageStorage storage)
+        ICodeInstrumentationEngine instrumentationEngine,
+        ITestRunner testRunner,
+        ICoverageTracker coverageTracker)
     {
-        _instrumenter = instrumenter;
-        _storage = storage;
+        _instrumentationEngine = instrumentationEngine;
+        _testRunner = testRunner;
+        _coverageTracker = coverageTracker;
     }
 
     public async Task<CoverageData> CollectCoverageDataAsync(ValidationContext context)
     {
-        // Get instrumented code data
-        var instrumentationData = await _instrumenter.GetInstrumentationDataAsync(context);
-
-        // Retrieve execution data from storage
-        var executionData = await _storage.GetExecutionDataAsync(context);
-
-        // Combine instrumentation and execution data
+        var config = context.GetConfiguration<CoverageConfiguration>();
         var coverageData = new CoverageData();
-        
-        foreach (var module in instrumentationData.Modules)
+
+        // Instrument code for coverage tracking
+        var instrumentedFiles = await _instrumentationEngine.InstrumentCodeAsync(context.FilePaths);
+
+        try
         {
-            var moduleCoverage = new ModuleCoverage
-            {
-                ModuleName = module.Name,
-                FilePath = module.Path,
-                ExcludedRegions = module.ExcludedRegions
-            };
+            // Run tests and collect coverage data
+            await _testRunner.RunTestsAsync(context.ProjectPath);
+            var rawCoverageData = await _coverageTracker.GetCoverageDataAsync();
 
-            var lineCoverage = new List<LineCoverage>();
-            foreach (var line in module.Lines)
+            // Process raw coverage data per module
+            foreach (var module in rawCoverageData)
             {
-                var executionInfo = executionData.GetExecutionInfo(module.Path, line.Number);
-                
-                lineCoverage.Add(new LineCoverage
+                if (config.ShouldExclude(module.Key))
+                    continue;
+
+                var moduleCoverage = new ModuleCoverage
                 {
-                    LineNumber = line.Number,
-                    Content = line.Content,
-                    IsCovered = executionInfo.Executed,
-                    ExecutionCount = executionInfo.ExecutionCount,
-                    IsExcluded = module.ExcludedRegions.Contains(line.Number)
-                });
+                    ModuleName = module.Key,
+                    FilePath = module.Key,
+                    CoveragePercentage = CalculateModuleCoverage(module.Value),
+                    LineByLineCoverage = module.Value.LineData,
+                    FunctionCoverage = module.Value.FunctionData
+                };
+
+                coverageData.ModuleCoverageData[module.Key] = moduleCoverage;
+                coverageData.LineCoverageData[module.Key] = module.Value.LineData;
+                coverageData.BranchData[module.Key] = module.Value.BranchData;
             }
-
-            moduleCoverage.LineByLineCoverage = lineCoverage;
-            coverageData.ModuleCoverageData[module.Path] = moduleCoverage;
-            coverageData.LineCoverageData[module.Path] = lineCoverage;
-
-            // Process branch data
-            var branchInfo = new List<BranchInfo>();
-            foreach (var branch in module.Branches)
-            {
-                var branchExecutionInfo = executionData.GetBranchExecutionInfo(module.Path, branch.Id);
-                
-                branchInfo.Add(new BranchInfo
-                {
-                    Location = $"{module.Path}:{branch.Line}",
-                    Condition = branch.Condition,
-                    BranchOutcomes = branchExecutionInfo.Outcomes
-                });
-            }
-
-            coverageData.BranchData[module.Path] = branchInfo;
+        }
+        finally
+        {
+            // Restore original code
+            await _instrumentationEngine.RestoreCodeAsync(instrumentedFiles);
         }
 
         return coverageData;
     }
-}
 
-public interface ICoverageInstrumenter
-{
-    Task<InstrumentationData> GetInstrumentationDataAsync(ValidationContext context);
-}
-
-public interface ICoverageStorage
-{
-    Task<ExecutionData> GetExecutionDataAsync(ValidationContext context);
-}
-
-public class InstrumentationData
-{
-    public List<ModuleInstrumentationInfo> Modules { get; set; } = new();
-}
-
-public class ModuleInstrumentationInfo
-{
-    public string Name { get; set; }
-    public string Path { get; set; }
-    public List<LineInfo> Lines { get; set; } = new();
-    public List<BranchInstrumentationInfo> Branches { get; set; } = new();
-    public List<int> ExcludedRegions { get; set; } = new();
-}
-
-public class LineInfo
-{
-    public int Number { get; set; }
-    public string Content { get; set; }
-}
-
-public class BranchInstrumentationInfo
-{
-    public string Id { get; set; }
-    public int Line { get; set; }
-    public string Condition { get; set; }
-}
-
-public class ExecutionData
-{
-    private readonly Dictionary<string, Dictionary<int, LineExecutionInfo>> _lineExecutionData = new();
-    private readonly Dictionary<string, Dictionary<string, BranchExecutionInfo>> _branchExecutionData = new();
-
-    public LineExecutionInfo GetExecutionInfo(string filePath, int lineNumber)
+    private double CalculateModuleCoverage(RawCoverageData data)
     {
-        if (_lineExecutionData.TryGetValue(filePath, out var fileData))
-        {
-            if (fileData.TryGetValue(lineNumber, out var lineInfo))
-            {
-                return lineInfo;
-            }
-        }
+        if (!data.LineData.Any())
+            return 0;
 
-        return new LineExecutionInfo();
-    }
+        var executableLines = data.LineData.Count(l => !l.IsExcluded);
+        if (executableLines == 0)
+            return 0;
 
-    public BranchExecutionInfo GetBranchExecutionInfo(string filePath, string branchId)
-    {
-        if (_branchExecutionData.TryGetValue(filePath, out var fileData))
-        {
-            if (fileData.TryGetValue(branchId, out var branchInfo))
-            {
-                return branchInfo;
-            }
-        }
-
-        return new BranchExecutionInfo();
+        var coveredLines = data.LineData.Count(l => !l.IsExcluded && l.IsCovered);
+        return (coveredLines * 100.0) / executableLines;
     }
 }
 
-public class LineExecutionInfo
+public interface ICodeInstrumentationEngine
 {
-    public bool Executed { get; set; }
-    public int ExecutionCount { get; set; }
+    Task<Dictionary<string, string>> InstrumentCodeAsync(string[] filePaths);
+    Task RestoreCodeAsync(Dictionary<string, string> instrumentedFiles);
 }
 
-public class BranchExecutionInfo
+public interface ITestRunner
 {
-    public Dictionary<string, bool> Outcomes { get; set; } = new();
+    Task RunTestsAsync(string projectPath);
+}
+
+public interface ICoverageTracker
+{
+    Task<Dictionary<string, RawCoverageData>> GetCoverageDataAsync();
+}
+
+public class RawCoverageData
+{
+    public List<LineCoverage> LineData { get; set; } = new();
+    public Dictionary<string, double> FunctionData { get; set; } = new();
+    public List<BranchInfo> BranchData { get; set; } = new();
 }
