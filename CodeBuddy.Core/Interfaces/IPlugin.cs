@@ -4,7 +4,7 @@ using System.Text.Json.Nodes;
 namespace CodeBuddy.Core.Interfaces;
 
 /// <summary>
-/// Base interface for plugins
+/// Base interface for plugins with hot-reload support
 /// </summary>
 public interface IPlugin
 {
@@ -63,4 +63,27 @@ public interface IPlugin
     /// <param name="error">The error that occurred</param>
     /// <returns>True if recovery was successful</returns>
     Task<bool> HandleErrorAsync(Exception error);
+    
+    /// <summary>
+    /// Prepares the plugin for hot-reload by cleaning up resources
+    /// </summary>
+    Task PrepareForReloadAsync();
+    
+    /// <summary>
+    /// Migrates plugin state from a previous version during hot-reload
+    /// </summary>
+    /// <param name="previousState">State from the previous version</param>
+    Task MigrateStateAsync(JsonObject? previousState);
+    
+    /// <summary>
+    /// Validates plugin's health and configuration
+    /// </summary>
+    /// <returns>True if the plugin is healthy and properly configured</returns>
+    Task<bool> ValidateHealthAsync();
+    
+    /// <summary>
+    /// Gets the current resource usage statistics
+    /// </summary>
+    /// <returns>Resource usage metrics</returns>
+    Task<ResourceMetrics> GetResourceMetricsAsync();
 }
