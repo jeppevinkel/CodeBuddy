@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using CodeBuddy.Core.Models;
 using CodeBuddy.Core.Models.AST;
+using CodeBuddy.Core.Models.Errors;
 using CodeBuddy.Core.Implementation.CodeValidation.AST;
+using CodeBuddy.Core.Implementation.ErrorHandling;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation
 {
@@ -12,12 +14,17 @@ namespace CodeBuddy.Core.Implementation.CodeValidation
         protected readonly IASTConverter _astConverter;
         protected readonly ASTPatternMatcher _patternMatcher;
         protected readonly IValidationCache _validationCache;
+        protected readonly IErrorHandlingService _errorHandler;
 
-        protected BaseCodeValidator(IASTConverter astConverter, IValidationCache validationCache)
+        protected BaseCodeValidator(
+            IASTConverter astConverter, 
+            IValidationCache validationCache,
+            IErrorHandlingService errorHandler)
         {
             _astConverter = astConverter;
             _patternMatcher = new ASTPatternMatcher();
             _validationCache = validationCache;
+            _errorHandler = errorHandler;
         }
 
         public abstract string Language { get; }
@@ -58,11 +65,18 @@ namespace CodeBuddy.Core.Implementation.CodeValidation
             catch (Exception ex)
             {
                 result.Status = ValidationStatus.Error;
+                var error = _errorHandler.CreateError(
+                    $"Validation failed: {ex.Message}",
+                    ErrorSeverity.Error,
+                    ErrorCategory.System);
+                
+                await _errorHandler.HandleErrorAsync(error);
+                
                 result.Issues.Add(new ValidationIssue
                 {
                     Severity = IssueSeverity.Error,
-                    Message = $"Validation failed: {ex.Message}",
-                    RuleId = "INTERNAL_ERROR"
+                    Message = error.Message,
+                    RuleId = error.ErrorCode
                 });
             }
             finally
@@ -129,12 +143,23 @@ namespace CodeBuddy.Core.Implementation.CodeValidation
                 var matches = await _patternMatcher.FindMatchesAsync(result.AST, pattern);
                 foreach (var match in matches)
                 {
+                    var error = _errorHandler.CreateError(
+                        $"Potential security vulnerability: {pattern.NodeType}",
+                        ErrorSeverity.Critical,
+                        ErrorCategory.Security,
+                        match.Location?.FilePath,
+                        match.Location?.LineNumber ?? 0,
+                        match.Location?.ColumnNumber ?? 0);
+                    
+                    await _errorHandler.HandleErrorAsync(error);
+                    
                     result.Issues.Add(new ValidationIssue
                     {
                         Severity = IssueSeverity.Critical,
-                        Message = $"Potential security vulnerability: {pattern.NodeType}",
+                        Message = error.Message,
                         Location = match.Location,
-                        RelatedNodes = new List<UnifiedASTNode> { match }
+                        RelatedNodes = new List<UnifiedASTNode> { match },
+                        RuleId = error.ErrorCode
                     });
                 }
             }
@@ -162,12 +187,23 @@ namespace CodeBuddy.Core.Implementation.CodeValidation
                 var matches = await _patternMatcher.FindMatchesAsync(result.AST, pattern);
                 foreach (var match in matches)
                 {
+                    var error = _errorHandler.CreateError(
+                        $"Code quality issue: {pattern.NodeType}",
+                        ErrorSeverity.Warning,
+                        ErrorCategory.Semantic,
+                        match.Location?.FilePath,
+                        match.Location?.LineNumber ?? 0,
+                        match.Location?.ColumnNumber ?? 0);
+                    
+                    await _errorHandler.HandleErrorAsync(error);
+                    
                     result.Issues.Add(new ValidationIssue
                     {
                         Severity = IssueSeverity.Warning,
-                        Message = $"Code quality issue: {pattern.NodeType}",
+                        Message = error.Message,
                         Location = match.Location,
-                        RelatedNodes = new List<UnifiedASTNode> { match }
+                        RelatedNodes = new List<UnifiedASTNode> { match },
+                        RuleId = error.ErrorCode
                     });
                 }
             }
@@ -195,12 +231,23 @@ namespace CodeBuddy.Core.Implementation.CodeValidation
                 var matches = await _patternMatcher.FindMatchesAsync(result.AST, pattern);
                 foreach (var match in matches)
                 {
+                    var error = _errorHandler.CreateError(
+                        $"Performance issue: {pattern.NodeType}",
+                        ErrorSeverity.Warning,
+                        ErrorCategory.Performance,
+                        match.Location?.FilePath,
+                        match.Location?.LineNumber ?? 0,
+                        match.Location?.ColumnNumber ?? 0);
+                    
+                    await _errorHandler.HandleErrorAsync(error);
+                    
                     result.Issues.Add(new ValidationIssue
                     {
                         Severity = IssueSeverity.Warning,
-                        Message = $"Performance issue: {pattern.NodeType}",
+                        Message = error.Message,
                         Location = match.Location,
-                        RelatedNodes = new List<UnifiedASTNode> { match }
+                        RelatedNodes = new List<UnifiedASTNode> { match },
+                        RuleId = error.ErrorCode
                     });
                 }
             }
