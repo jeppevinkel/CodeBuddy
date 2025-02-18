@@ -84,6 +84,185 @@ namespace CodeBuddy.Core.Implementation.CodeValidation;
 /// </remarks>
 public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDisposable
 {
+    private readonly ILogger _logger;
+    private readonly Stopwatch _totalStopwatch = new();
+    private readonly Dictionary<string, Stopwatch> _phaseStopwatches = new();
+    private readonly PerformanceMonitor _performanceMonitor = new();
+    private readonly List<string> _temporaryFiles = new();
+    private readonly ResourceRegistry _resourceRegistry;
+    private readonly ResourceUsageTracker _resourceTracker;
+    private readonly ObjectPool<byte[]> _bufferPool;
+    private readonly ConcurrentQueue<IDisposable> _disposables = new();
+    private readonly SemaphoreSlim _cleanupLock = new(1, 1);
+    private readonly BlockingCollection<ValidationTask> _validationQueue;
+    private readonly CancellationTokenSource _queueProcessingCts;
+    private readonly Task _queueProcessingTask;
+    private readonly DiagnosticsCollector _diagnostics;
+    private bool _disposed;
+    private FileOperationProgress _progress;
+
+    /// <summary>
+    /// Central registry for tracking allocated resources and their lifecycle
+    /// </summary>
+    private class ResourceRegistry
+    {
+        private readonly ConcurrentDictionary<Guid, ResourceInfo> _resources = new();
+        private readonly ILogger _logger;
+
+        public ResourceRegistry(ILogger logger)
+        {
+            _logger = logger;
+        }
+
+        public record ResourceInfo
+        {
+            public Guid Id { get; init; }
+            public string Type { get; init; }
+            public DateTime AllocationTime { get; init; }
+            public string StackTrace { get; init; }
+            public WeakReference Resource { get; init; }
+            public long? Size { get; init; }
+        }
+
+        public Guid RegisterResource(object resource, string type, long? size = null)
+        {
+            var info = new ResourceInfo
+            {
+                Id = Guid.NewGuid(),
+                Type = type,
+                AllocationTime = DateTime.UtcNow,
+                StackTrace = Environment.StackTrace,
+                Resource = new WeakReference(resource),
+                Size = size
+            };
+
+            _resources[info.Id] = info;
+            _logger.LogDebug("Registered resource: {Type} ({Id})", type, info.Id);
+            return info.Id;
+        }
+
+        public void UnregisterResource(Guid id)
+        {
+            if (_resources.TryRemove(id, out var info))
+            {
+                _logger.LogDebug("Unregistered resource: {Type} ({Id})", info.Type, id);
+            }
+        }
+
+        public IEnumerable<ResourceInfo> GetResourceLeaks(TimeSpan threshold)
+        {
+            var now = DateTime.UtcNow;
+            return _resources.Values
+                .Where(r => (now - r.AllocationTime) > threshold && !r.Resource.IsAlive)
+                .ToList();
+        }
+
+        public ResourceReport GenerateReport()
+        {
+            var report = new ResourceReport();
+            var now = DateTime.UtcNow;
+
+            foreach (var resource in _resources.Values)
+            {
+                report.TotalResources++;
+                report.ResourcesByType[resource.Type] = report.ResourcesByType.GetValueOrDefault(resource.Type) + 1;
+                
+                if (!resource.Resource.IsAlive)
+                {
+                    report.PotentialLeaks++;
+                    report.LeaksByType[resource.Type] = report.LeaksByType.GetValueOrDefault(resource.Type) + 1;
+                }
+
+                if (resource.Size.HasValue)
+                {
+                    report.TotalSize += resource.Size.Value;
+                }
+
+                var age = now - resource.AllocationTime;
+                if (age > report.OldestResourceAge)
+                {
+                    report.OldestResourceAge = age;
+                }
+            }
+
+            return report;
+        }
+
+        public class ResourceReport
+        {
+            public int TotalResources { get; set; }
+            public Dictionary<string, int> ResourcesByType { get; } = new();
+            public int PotentialLeaks { get; set; }
+            public Dictionary<string, int> LeaksByType { get; } = new();
+            public long TotalSize { get; set; }
+            public TimeSpan OldestResourceAge { get; set; }
+        }
+    }
+
+    /// <summary>
+    /// Collects and manages diagnostics data for resource usage and performance
+    /// </summary>
+    private class DiagnosticsCollector
+    {
+        private readonly ConcurrentQueue<DiagnosticEvent> _events = new();
+        private readonly ILogger _logger;
+        private readonly int _maxEvents;
+
+        public DiagnosticEvent[] Events => _events.ToArray();
+
+        public DiagnosticsCollector(ILogger logger, int maxEvents = 1000)
+        {
+            _logger = logger;
+            _maxEvents = maxEvents;
+        }
+
+        public void AddEvent(string type, string message, IDictionary<string, object> data = null)
+        {
+            var evt = new DiagnosticEvent
+            {
+                Timestamp = DateTime.UtcNow,
+                Type = type,
+                Message = message,
+                Data = data ?? new Dictionary<string, object>()
+            };
+
+            _events.Enqueue(evt);
+            _logger.LogDebug("Diagnostic event: {Type} - {Message}", type, message);
+
+            // Trim old events if needed
+            while (_events.Count > _maxEvents && _events.TryDequeue(out _)) { }
+        }
+
+        public class DiagnosticEvent
+        {
+            public DateTime Timestamp { get; init; }
+            public string Type { get; init; }
+            public string Message { get; init; }
+            public IDictionary<string, object> Data { get; init; }
+        }
+
+        public DiagnosticReport GenerateReport()
+        {
+            var events = Events;
+            return new DiagnosticReport
+            {
+                TotalEvents = events.Length,
+                EventsByType = events.GroupBy(e => e.Type)
+                    .ToDictionary(g => g.Key, g => g.Count()),
+                TimeRange = events.Any() 
+                    ? (events.Max(e => e.Timestamp) - events.Min(e => e.Timestamp))
+                    : TimeSpan.Zero
+            };
+        }
+
+        public class DiagnosticReport
+        {
+            public int TotalEvents { get; init; }
+            public Dictionary<string, int> EventsByType { get; init; }
+            public TimeSpan TimeRange { get; init; }
+        }
+    }
+{
     protected readonly ILogger _logger;
     private readonly Stopwatch _totalStopwatch = new();
     private readonly Dictionary<string, Stopwatch> _phaseStopwatches = new();
@@ -382,17 +561,74 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
         await _cleanupLock.WaitAsync();
         try
         {
+            _diagnostics.AddEvent("GradualCleanup", "Starting gradual cleanup");
+
             // Release unused buffers
             _bufferPool.Clear();
+            _diagnostics.AddEvent("BufferPoolCleanup", "Buffer pool cleared");
 
             // Cleanup older temporary files
             if (_temporaryFiles.Count > MaxTemporaryFiles / 2)
             {
+                var countBefore = _temporaryFiles.Count;
                 await CleanupOldestTemporaryFilesAsync(MaxTemporaryFiles / 4);
+                var cleaned = countBefore - _temporaryFiles.Count;
+                _diagnostics.AddEvent("TempFileCleanup", $"Cleaned {cleaned} temporary files");
+            }
+
+            // Cleanup old disposables that haven't been properly disposed
+            var disposablesBefore = _disposables.Count;
+            while (_disposables.TryPeek(out var disposable))
+            {
+                if (disposable is IAsyncDisposable asyncDisposable)
+                {
+                    await asyncDisposable.DisposeAsync();
+                }
+                else
+                {
+                    disposable.Dispose();
+                }
+                _disposables.TryDequeue(out _);
+            }
+            var disposablesCleaned = disposablesBefore - _disposables.Count;
+            if (disposablesCleaned > 0)
+            {
+                _diagnostics.AddEvent("DisposableCleanup", $"Cleaned {disposablesCleaned} disposable resources");
+            }
+
+            // Cleanup old resources from registry
+            var leaks = _resourceRegistry.GetResourceLeaks(TimeSpan.FromMinutes(30));
+            foreach (var leak in leaks)
+            {
+                _resourceRegistry.UnregisterResource(leak.Id);
+            }
+            if (leaks.Any())
+            {
+                _diagnostics.AddEvent("LeakCleanup", $"Cleaned {leaks.Count()} leaked resources");
             }
 
             // Suggest garbage collection
             GC.Collect(0, GCCollectionMode.Optimized, false);
+            _diagnostics.AddEvent("GarbageCollection", "Optimized garbage collection performed");
+
+            // Generate final cleanup report
+            var report = _resourceRegistry.GenerateReport();
+            _diagnostics.AddEvent("CleanupReport", "Gradual cleanup completed", new Dictionary<string, object>
+            {
+                { "DisposablesCleaned", disposablesCleaned },
+                { "TempFilesCleaned", cleaned },
+                { "LeaksCleaned", leaks.Count() },
+                { "RemainingResources", report.TotalResources }
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during gradual cleanup");
+            _diagnostics.AddEvent("Error", "Gradual cleanup error", new Dictionary<string, object>
+            {
+                { "Error", ex.Message },
+                { "StackTrace", ex.StackTrace }
+            });
         }
         finally
         {
@@ -593,22 +829,70 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     private async Task MonitorResourcesAsync(CancellationToken cancellationToken)
     {
         var currentUsage = await _resourceTracker.GetCurrentMemoryUsageAsync();
+        var process = Process.GetCurrentProcess();
         
+        // Track current resource state
+        var resourceState = new Dictionary<string, object>
+        {
+            { "MemoryUsageMB", currentUsage / (1024 * 1024) },
+            { "HandleCount", process.HandleCount },
+            { "ThreadCount", process.Threads.Count },
+            { "TempFiles", _temporaryFiles.Count },
+            { "DisposableCount", _disposables.Count },
+            { "ValidationQueueSize", _validationQueue.Count }
+        };
+        
+        // Analyze memory pressure
         if (currentUsage > CriticalMemoryThresholdBytes)
         {
+            _diagnostics.AddEvent("CriticalMemory", "Critical memory threshold exceeded", resourceState);
             await EmergencyCleanupAsync();
         }
         else if (currentUsage > MemoryThresholdBytes)
         {
+            _diagnostics.AddEvent("HighMemory", "High memory threshold exceeded", resourceState);
             await GradualCleanupAsync();
         }
 
-        // Log resource usage for monitoring
+        // Check for leaked or old resources
+        var resourceReport = _resourceRegistry.GenerateReport();
+        if (resourceReport.PotentialLeaks > 0)
+        {
+            _diagnostics.AddEvent("ResourceLeak", 
+                $"Detected {resourceReport.PotentialLeaks} potential resource leaks",
+                new Dictionary<string, object>(resourceState)
+                {
+                    { "LeaksByType", resourceReport.LeaksByType }
+                });
+        }
+
+        // Monitor handle usage
+        if (process.HandleCount > 1000)
+        {
+            _diagnostics.AddEvent("HighHandleCount", 
+                "High number of handles detected",
+                resourceState);
+        }
+
+        // Check queue health
+        if (_validationQueue.Count > MaxQueueSize * 0.8)
+        {
+            _diagnostics.AddEvent("QueueNearCapacity",
+                "Validation queue approaching capacity",
+                resourceState);
+        }
+
+        // Log overall resource usage
         _logger.LogInformation(
-            "Resource Usage - Memory: {MemoryMB}MB, Handles: {Handles}, Files: {Files}",
+            "Resource Usage - Memory: {MemoryMB}MB, Handles: {Handles}, Threads: {Threads}, Files: {Files}, Queue: {Queue}",
             currentUsage / (1024 * 1024),
-            _resourceTracker.HandleCount,
-            _temporaryFiles.Count);
+            process.HandleCount,
+            process.Threads.Count,
+            _temporaryFiles.Count,
+            _validationQueue.Count);
+
+        // Add monitoring event
+        _diagnostics.AddEvent("ResourceMonitoring", "Resource state updated", resourceState);
     }
 
     private async Task<ValidationResult> ProcessLargeFileAsync(string code, string language, ValidationOptions options, CancellationToken cancellationToken)
@@ -671,23 +955,43 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     private async Task EmergencyCleanupAsync()
     {
         _logger.LogWarning("Initiating emergency cleanup due to high memory usage");
+        _diagnostics.AddEvent("EmergencyCleanup", "Starting emergency cleanup");
         
         try
         {
             await _cleanupLock.WaitAsync();
             
+            // Take snapshot of current state
+            var stateBefore = new Dictionary<string, object>
+            {
+                { "QueueSize", _validationQueue.Count },
+                { "DisposablesCount", _disposables.Count },
+                { "TempFilesCount", _temporaryFiles.Count },
+                { "MemoryUsage", Process.GetCurrentProcess().WorkingSet64 }
+            };
+            
             // Stop accepting new tasks
             _validationQueue.CompleteAdding();
+            _diagnostics.AddEvent("QueueStopped", "Validation queue stopped accepting new tasks");
             
             // Clear all queues and caches
-            while (_validationQueue.TryTake(out _)) { }
+            while (_validationQueue.TryTake(out var task))
+            {
+                task.CompletionSource.TrySetCanceled();
+            }
             _phaseStopwatches.Clear();
             _bufferPool.Clear();
             
-            // Cleanup all temporary resources
-            await CleanupTemporaryFilesAsync();
+            _diagnostics.AddEvent("CacheCleared", "All caches and queues cleared");
             
-            // Clear pooled objects
+            // Cleanup all temporary resources
+            var tempFileCount = _temporaryFiles.Count;
+            await CleanupTemporaryFilesAsync();
+            _diagnostics.AddEvent("TempFilesCleared", $"Cleaned {tempFileCount} temporary files");
+            
+            // Clear pooled objects and track cleanup
+            var disposedCount = 0;
+            var errorCount = 0;
             while (_disposables.TryDequeue(out var disposable))
             {
                 try
@@ -696,19 +1000,41 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
                         await asyncDisposable.DisposeAsync();
                     else
                         disposable.Dispose();
+                    disposedCount++;
                 }
                 catch (Exception ex)
                 {
+                    errorCount++;
                     _logger.LogError(ex, "Error disposing resource during emergency cleanup");
+                    _diagnostics.AddEvent("DisposalError", "Error disposing resource", new Dictionary<string, object>
+                    {
+                        { "Error", ex.Message },
+                        { "ResourceType", disposable.GetType().Name }
+                    });
                 }
             }
             
-            // Force garbage collection
+            _diagnostics.AddEvent("DisposablesCleared", "Cleared disposable resources", new Dictionary<string, object>
+            {
+                { "DisposedCount", disposedCount },
+                { "ErrorCount", errorCount }
+            });
+            
+            // Clear leaked resources from registry
+            var leaks = _resourceRegistry.GetResourceLeaks(TimeSpan.FromMinutes(15));
+            foreach (var leak in leaks)
+            {
+                _resourceRegistry.UnregisterResource(leak.Id);
+            }
+            
+            // Force aggressive garbage collection
             for (int i = 0; i < 2; i++)
             {
                 GC.Collect(2, GCCollectionMode.Aggressive, true);
                 GC.WaitForPendingFinalizers();
             }
+            
+            _diagnostics.AddEvent("GarbageCollection", "Aggressive garbage collection completed");
             
             // Allow system to stabilize
             await Task.Delay(200);
@@ -718,7 +1044,37 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
             var newQueue = new BlockingCollection<ValidationTask>(MaxQueueSize);
             Interlocked.Exchange(ref _validationQueue, newQueue);
             
+            // Take snapshot of final state
+            var stateAfter = new Dictionary<string, object>
+            {
+                { "QueueSize", 0 },
+                { "DisposablesCount", _disposables.Count },
+                { "TempFilesCount", _temporaryFiles.Count },
+                { "MemoryUsage", Process.GetCurrentProcess().WorkingSet64 }
+            };
+            
+            // Generate cleanup report
+            _diagnostics.AddEvent("CleanupCompleted", "Emergency cleanup completed", new Dictionary<string, object>
+            {
+                { "InitialState", stateBefore },
+                { "FinalState", stateAfter },
+                { "ResourcesDisposed", disposedCount },
+                { "DisposalErrors", errorCount },
+                { "LeaksCleared", leaks.Count() },
+                { "MemoryFreed", ((long)stateBefore["MemoryUsage"] - (long)stateAfter["MemoryUsage"]) / (1024 * 1024) + "MB" }
+            });
+            
             _logger.LogInformation("Emergency cleanup completed successfully");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Critical error during emergency cleanup");
+            _diagnostics.AddEvent("CriticalError", "Emergency cleanup failed", new Dictionary<string, object>
+            {
+                { "Error", ex.Message },
+                { "StackTrace", ex.StackTrace }
+            });
+            throw; // Rethrow to ensure the error is properly handled
         }
         finally
         {
