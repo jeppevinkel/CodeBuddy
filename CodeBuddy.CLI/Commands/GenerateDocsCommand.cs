@@ -131,11 +131,68 @@ namespace CodeBuddy.CLI.Commands
                 {
                     Console.WriteLine($"\nDocumentation coverage: {coverageReport.OverallCoverage:F1}% (meets requirements)");
                 }
+
+                // Store and analyze trends
+                var trendAnalyzer = new DocumentationTrendAnalyzer(fileOps);
+                await trendAnalyzer.StoreTrendDataAsync(coverageReport, 
+                    Environment.GetEnvironmentVariable("GITHUB_SHA") ?? "local",
+                    Environment.GetEnvironmentVariable("GITHUB_REF") ?? "local");
+
+                var trends = await trendAnalyzer.AnalyzeTrendsAsync();
+                if (trends.Insights.Any())
+                {
+                    Console.WriteLine("\nTrend Analysis Insights:");
+                    foreach (var insight in trends.Insights)
+                    {
+                        Console.WriteLine($"- {insight}");
+                    }
+                }
+
+                // Team-specific validation
+                var teamId = Environment.GetEnvironmentVariable("TEAM_ID");
+                if (!string.IsNullOrEmpty(teamId))
+                {
+                    var teamConfigs = await LoadTeamConfigurations(fileOps);
+                    if (teamConfigs.ContainsKey(teamId))
+                    {
+                        var teamValidator = new TeamDocumentationValidator(teamConfigs, 
+                            new DocumentationCoverageAnalyzer(teamConfigs[teamId].Requirements));
+                        
+                        var teamIssues = await teamValidator.ValidateTeamDocumentationAsync(teamId, coverageReport);
+                        if (teamIssues.Any())
+                        {
+                            Console.WriteLine($"\nTeam-Specific Documentation Issues for {teamConfigs[teamId].TeamName}:");
+                            foreach (var issue in teamIssues.OrderByDescending(i => i.Severity))
+                            {
+                                Console.WriteLine($"[{issue.Severity}] {issue.Component}: {issue.Description}");
+                            }
+
+                            if (strict && teamIssues.Any(i => i.Severity == IssueSeverity.Error))
+                            {
+                                throw new Exception("Documentation does not meet team-specific requirements");
+                            }
+                        }
+                    }
+                }
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"Error: {ex.Message}");
                 context.ExitCode = 1;
+            }
+        }
+
+        private async Task<Dictionary<string, TeamDocumentationConfig>> LoadTeamConfigurations(IFileOperations fileOps)
+        {
+            try
+            {
+                var content = await fileOps.ReadFileAsync("docs/config/team_documentation_config.json");
+                return System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, TeamDocumentationConfig>>(content)
+                    ?? new Dictionary<string, TeamDocumentationConfig>();
+            }
+            catch
+            {
+                return new Dictionary<string, TeamDocumentationConfig>();
             }
         }
     }
