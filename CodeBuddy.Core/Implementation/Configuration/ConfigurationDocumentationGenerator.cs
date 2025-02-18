@@ -19,6 +19,152 @@ namespace CodeBuddy.Core.Implementation.Configuration
     {
         private readonly ILogger<ConfigurationDocumentationGenerator> _logger;
         private readonly Assembly[] _assemblies;
+        private const string DocumentationHistoryPath = "docs/configuration/history";
+        private readonly string _currentVersion;
+        
+        public ConfigurationDocumentationGenerator(
+            ILogger<ConfigurationDocumentationGenerator> logger,
+            string currentVersion,
+            params Assembly[] assemblies)
+        {
+            _logger = logger;
+            _assemblies = assemblies;
+            _currentVersion = currentVersion;
+        }
+
+        /// <summary>
+        /// Validates an existing configuration against the documentation rules
+        /// </summary>
+        public async Task<ValidationResult> ValidateConfiguration(string configurationJson)
+        {
+            try
+            {
+                var result = new ValidationResult();
+                var configTypes = GetConfigurationTypes();
+                
+                foreach (var type in configTypes)
+                {
+                    var section = JsonSerializer.Deserialize(configurationJson, type);
+                    var validationResults = new List<ValidationResult>();
+                    
+                    if (!Validator.TryValidateObject(section, new ValidationContext(section), validationResults, true))
+                    {
+                        foreach (var validationResult in validationResults)
+                        {
+                            result.ValidationErrors.Add(validationResult);
+                        }
+                    }
+
+                    ValidateSchemaVersion(type, section, result);
+                    ValidateRequiredProperties(type, section, result);
+                    ValidatePropertyRanges(type, section, result);
+                }
+
+                return result;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error validating configuration");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Archives the current documentation and maintains version history
+        /// </summary>
+        public async Task ArchiveDocumentationVersion(string documentation)
+        {
+            try
+            {
+                var versionPath = Path.Combine(DocumentationHistoryPath, _currentVersion);
+                Directory.CreateDirectory(versionPath);
+
+                var timestamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+                var fileName = Path.Combine(versionPath, $"configuration_{timestamp}.md");
+
+                await File.WriteAllTextAsync(fileName, documentation);
+
+                // Create version index
+                var indexPath = Path.Combine(DocumentationHistoryPath, "index.md");
+                var indexContent = new StringBuilder();
+                
+                indexContent.AppendLine("# Configuration Documentation Version History");
+                indexContent.AppendLine();
+                
+                foreach (var dir in Directory.GetDirectories(DocumentationHistoryPath))
+                {
+                    var version = Path.GetFileName(dir);
+                    var files = Directory.GetFiles(dir, "*.md")
+                        .OrderByDescending(f => f)
+                        .Select(f => Path.GetFileName(f));
+
+                    indexContent.AppendLine($"## Version {version}");
+                    indexContent.AppendLine();
+                    
+                    foreach (var file in files)
+                    {
+                        indexContent.AppendLine($"- [{file}]({version}/{file})");
+                    }
+                    indexContent.AppendLine();
+                }
+
+                await File.WriteAllTextAsync(indexPath, indexContent.ToString());
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error archiving documentation version");
+                throw;
+            }
+        }
+
+        private void ValidateSchemaVersion(Type type, object section, ValidationResult result)
+        {
+            var schemaVersion = type.GetCustomAttribute<SchemaVersionAttribute>();
+            if (schemaVersion != null)
+            {
+                var sectionVersion = section.GetType().GetCustomAttribute<SchemaVersionAttribute>();
+                if (sectionVersion == null || sectionVersion.Version != schemaVersion.Version)
+                {
+                    result.ValidationErrors.Add(
+                        new ValidationResult($"Schema version mismatch. Expected {schemaVersion.Version}"));
+                }
+            }
+        }
+
+        private void ValidateRequiredProperties(Type type, object section, ValidationResult result)
+        {
+            var properties = type.GetProperties()
+                .Where(p => p.GetCustomAttribute<RequiredAttribute>() != null);
+
+            foreach (var property in properties)
+            {
+                var value = property.GetValue(section);
+                if (value == null)
+                {
+                    result.ValidationErrors.Add(
+                        new ValidationResult($"Required property {property.Name} is missing"));
+                }
+            }
+        }
+
+        private void ValidatePropertyRanges(Type type, object section, ValidationResult result)
+        {
+            var properties = type.GetProperties()
+                .Where(p => p.GetCustomAttribute<RangeAttribute>() != null);
+
+            foreach (var property in properties)
+            {
+                var value = property.GetValue(section);
+                var rangeAttr = property.GetCustomAttribute<RangeAttribute>();
+
+                if (value != null && !rangeAttr.IsValid(value))
+                {
+                    result.ValidationErrors.Add(
+                        new ValidationResult(
+                            $"Property {property.Name} value {value} is outside valid range {rangeAttr.Minimum} to {rangeAttr.Maximum}"));
+                }
+            }
+        }
 
         public ConfigurationDocumentationGenerator(
             ILogger<ConfigurationDocumentationGenerator> logger,
@@ -32,7 +178,7 @@ namespace CodeBuddy.Core.Implementation.Configuration
         /// Generates markdown documentation for all configuration sections including examples,
         /// migration paths, and validation rules
         /// </summary>
-        public async Task<string> GenerateDocumentation()
+        public async Task<string> GenerateDocumentation(bool archive = true)
         {
             try
             {
@@ -79,7 +225,14 @@ namespace CodeBuddy.Core.Implementation.Configuration
                 sb.AppendLine();
                 GenerateConfigurationTemplates(sb, configTypes);
 
-                return sb.ToString();
+                var documentation = sb.ToString();
+                
+                if (archive)
+                {
+                    await ArchiveDocumentationVersion(documentation);
+                }
+                
+                return documentation;
             }
             catch (Exception ex)
             {
