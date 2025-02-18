@@ -19,6 +19,7 @@ public class ConfigurationManager : IConfigurationManager
     private readonly Dictionary<string, object> _cache = new();
     private readonly JsonSerializerOptions _jsonOptions;
     private readonly Timer _healthCheckTimer;
+    private readonly IConfigurationMigrationManager _migrationManager;
 
     public ConfigurationManager(
         IFileOperations fileOperations, 
@@ -28,6 +29,8 @@ public class ConfigurationManager : IConfigurationManager
         _fileOperations = fileOperations;
         _logger = logger;
         _configPath = configPath;
+        _migrationManager = new ConfigurationMigrationManager(
+            loggerFactory.CreateLogger<ConfigurationMigrationManager>());
         
         _jsonOptions = new JsonSerializerOptions
         {
@@ -41,9 +44,9 @@ public class ConfigurationManager : IConfigurationManager
     }
 
     /// <summary>
-    /// Gets configuration for a specific section with validation and caching
+    /// Gets configuration for a specific section with validation, caching, and migration
     /// </summary>
-    public T GetConfiguration<T>(string section) where T : class, new()
+    public async Task<T> GetConfiguration<T>(string section) where T : class, new()
     {
         try
         {
@@ -55,16 +58,45 @@ public class ConfigurationManager : IConfigurationManager
                 return (T)cached;
             }
 
-            // Load and validate configuration
+            // Load configuration
             var config = LoadConfiguration<T>(section);
+            
+            // Check if migration is needed
+            if (_migrationManager.NeedsMigration(section, config))
+            {
+                _logger.LogInformation("Configuration migration needed for section {Section}", section);
+                
+                var migrationResult = await _migrationManager.MigrateConfiguration(section, config);
+                if (!migrationResult.Success)
+                {
+                    _logger.LogError("Configuration migration failed for section {Section}: {Error}", 
+                        section, migrationResult.Error);
+                        
+                    // Use original config if migration failed
+                    if (migrationResult.Configuration == null)
+                    {
+                        _logger.LogWarning("Using original configuration for section {Section}", section);
+                    }
+                    else
+                    {
+                        config = (T)migrationResult.Configuration;
+                    }
+                }
+                else
+                {
+                    config = (T)migrationResult.Configuration!;
+                    _logger.LogInformation("Configuration migration successful for section {Section}", section);
+                }
+            }
             
             // Validate configuration
             var validationResults = ValidateConfiguration(config);
-            if (validationResults.Any())
+            var warnings = validationResults.Where(r => !r.ErrorMessage?.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase) == true);
+            if (warnings.Any())
             {
-                var errors = string.Join(Environment.NewLine, validationResults.Select(r => r.ErrorMessage));
-                _logger.LogWarning("Configuration validation warnings for section {Section}:{NewLine}{Errors}", 
-                    section, Environment.NewLine, errors);
+                var warningMessages = string.Join(Environment.NewLine, warnings.Select(r => r.ErrorMessage));
+                _logger.LogWarning("Configuration validation warnings for section {Section}:{NewLine}{Warnings}", 
+                    section, Environment.NewLine, warningMessages);
             }
 
             // Cache and return
@@ -79,9 +111,9 @@ public class ConfigurationManager : IConfigurationManager
     }
 
     /// <summary>
-    /// Saves configuration with validation and schema checks
+    /// Saves configuration with validation, schema checks, and versioning
     /// </summary>
-    public void SaveConfiguration<T>(string section, T configuration) where T : class
+    public async Task SaveConfiguration<T>(string section, T configuration) where T : class
     {
         try
         {
@@ -106,14 +138,38 @@ public class ConfigurationManager : IConfigurationManager
             var config = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(configJson, _jsonOptions) 
                 ?? new Dictionary<string, JsonElement>();
 
-            // Update section with schema version
-            var sectionElement = JsonSerializer.SerializeToElement(configuration, _jsonOptions);
-            config[section] = sectionElement;
-            config[$"{section}_SchemaVersion"] = JsonSerializer.SerializeToElement(GetSchemaVersion<T>());
+            // Create backup before saving
+            var backupDir = Path.Combine(Path.GetDirectoryName(_configPath) ?? ".", "backups");
+            Directory.CreateDirectory(backupDir);
+            var backupPath = Path.Combine(backupDir, $"{Path.GetFileNameWithoutExtension(_configPath)}_{DateTime.Now:yyyyMMddHHmmss}.json");
+            if (File.Exists(_configPath))
+            {
+                await File.CopyAsync(_configPath, backupPath);
+            }
 
-            // Save back to file
-            var updatedJson = JsonSerializer.Serialize(config, _jsonOptions);
-            File.WriteAllText(_configPath, updatedJson);
+            try
+            {
+                // Update section with schema version
+                var sectionElement = JsonSerializer.SerializeToElement(configuration, _jsonOptions);
+                config[section] = sectionElement;
+                config[$"{section}_SchemaVersion"] = JsonSerializer.SerializeToElement(GetSchemaVersion<T>());
+
+                // Save back to file
+                var updatedJson = JsonSerializer.Serialize(config, _jsonOptions);
+                await File.WriteAllTextAsync(_configPath, updatedJson);
+                
+                _logger.LogInformation("Configuration saved successfully for section {Section} with backup at {BackupPath}", 
+                    section, backupPath);
+            }
+            catch (Exception)
+            {
+                _logger.LogWarning("Error saving configuration, attempting to restore from backup {BackupPath}", backupPath);
+                if (File.Exists(backupPath))
+                {
+                    await File.CopyAsync(backupPath, _configPath, true);
+                }
+                throw;
+            }
 
             // Update cache and run health check
             _cache[section] = configuration;
@@ -269,6 +325,31 @@ public class ConfigurationManager : IConfigurationManager
         var type = typeof(T);
         var schemaVersion = type.GetCustomAttribute<SchemaVersionAttribute>()?.Version ?? "1.0";
         return schemaVersion;
+    }
+
+    /// <summary>
+    /// Gets the schema version for a configuration section
+    /// </summary>
+    public string GetConfigurationVersion(string section)
+    {
+        try
+        {
+            var configJson = File.Exists(_configPath) 
+                ? File.ReadAllText(_configPath) 
+                : "{}";
+
+            var config = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(configJson, _jsonOptions) 
+                ?? new Dictionary<string, JsonElement>();
+
+            return config.TryGetValue($"{section}_SchemaVersion", out var version)
+                ? version.GetString() ?? "1.0"
+                : "1.0";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting configuration version for section {Section}", section);
+            return "1.0";
+        }
     }
 
     /// <summary>
