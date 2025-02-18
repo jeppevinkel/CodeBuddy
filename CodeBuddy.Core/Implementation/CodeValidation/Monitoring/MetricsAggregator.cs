@@ -1,154 +1,104 @@
 using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Threading;
-using CodeBuddy.Core.Models;
+using System.Threading.Tasks;
+using CodeBuddy.Core.Models.Analytics;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation.Monitoring
 {
     public interface IMetricsAggregator
     {
-        void RecordMiddlewareExecution(string middleware, bool success, TimeSpan duration);
-        void RecordCircuitBreakerStatus(string middleware, bool isOpen);
-        void RecordRetryAttempt(string middleware);
         void RecordResourceUtilization(ResourceMetrics metrics);
-        MetricsSummary GetCurrentMetrics();
-        IEnumerable<MetricsSummary> GetHistoricalMetrics(TimeSpan timeWindow);
+        void RecordMiddlewareExecution(string middlewareName, bool success, TimeSpan duration);
+        void RecordRetryAttempt(string middlewareName);
+        void RecordCircuitBreakerStatus(string middlewareName, bool isOpen);
+        RealtimeMetrics GetCurrentMetrics();
+        Task<double> GetAverageResponseTimeAsync(TimeRange timeRange);
+        Task<double> GetThroughputAsync(TimeRange timeRange);
+        Task<double> GetErrorRateAsync(TimeRange timeRange);
+        Task<int> GetConcurrentOperationsAsync();
+        Task<double> GetResourceEfficiencyAsync(TimeRange timeRange);
     }
 
     public class MetricsAggregator : IMetricsAggregator
     {
-        private readonly ConcurrentDictionary<string, MiddlewareMetrics> _middlewareMetrics = new();
-        private readonly ConcurrentQueue<TimestampedMetrics> _historicalMetrics = new();
-        private readonly Timer _aggregationTimer;
-        private const int MetricsRetentionHours = 24;
+        private readonly IResourceAnalytics _resourceAnalytics;
+        private readonly ResourceMetricsBuffer _metricsBuffer;
 
-        public MetricsAggregator()
+        public MetricsAggregator(IResourceAnalytics resourceAnalytics)
         {
-            _aggregationTimer = new Timer(PruneHistoricalMetrics, null, TimeSpan.FromHours(1), TimeSpan.FromHours(1));
-        }
-
-        public void RecordMiddlewareExecution(string middleware, bool success, TimeSpan duration)
-        {
-            var metrics = _middlewareMetrics.GetOrAdd(middleware, _ => new MiddlewareMetrics());
-            if (success)
-            {
-                Interlocked.Increment(ref metrics.SuccessCount);
-            }
-            else
-            {
-                Interlocked.Increment(ref metrics.FailureCount);
-            }
-            metrics.AddExecutionTime(duration);
-        }
-
-        public void RecordCircuitBreakerStatus(string middleware, bool isOpen)
-        {
-            var metrics = _middlewareMetrics.GetOrAdd(middleware, _ => new MiddlewareMetrics());
-            metrics.UpdateCircuitBreakerStatus(isOpen);
-        }
-
-        public void RecordRetryAttempt(string middleware)
-        {
-            var metrics = _middlewareMetrics.GetOrAdd(middleware, _ => new MiddlewareMetrics());
-            Interlocked.Increment(ref metrics.RetryCount);
+            _resourceAnalytics = resourceAnalytics;
+            _metricsBuffer = new ResourceMetricsBuffer();
         }
 
         public void RecordResourceUtilization(ResourceMetrics metrics)
         {
-            var timestamp = DateTime.UtcNow;
-            _historicalMetrics.Enqueue(new TimestampedMetrics
-            {
-                Timestamp = timestamp,
-                Metrics = new MetricsSummary
-                {
-                    ResourceMetrics = metrics,
-                    MiddlewareMetrics = GetCurrentMiddlewareMetrics()
-                }
-            });
+            _metricsBuffer.AddMetrics(metrics);
         }
 
-        public MetricsSummary GetCurrentMetrics()
+        public void RecordMiddlewareExecution(string middlewareName, bool success, TimeSpan duration)
         {
-            return new MetricsSummary
+            _metricsBuffer.AddMiddlewareExecution(middlewareName, success, duration);
+        }
+
+        public void RecordRetryAttempt(string middlewareName)
+        {
+            _metricsBuffer.AddRetryAttempt(middlewareName);
+        }
+
+        public void RecordCircuitBreakerStatus(string middlewareName, bool isOpen)
+        {
+            _metricsBuffer.UpdateCircuitBreakerStatus(middlewareName, isOpen);
+        }
+
+        public RealtimeMetrics GetCurrentMetrics()
+        {
+            var metrics = _metricsBuffer.GetCurrentMetrics();
+            return new RealtimeMetrics
             {
-                MiddlewareMetrics = GetCurrentMiddlewareMetrics(),
-                ResourceMetrics = GetLatestResourceMetrics()
+                CpuUsagePercent = metrics.CpuUsagePercent,
+                PeakCpuUsage = _metricsBuffer.GetPeakCpuUsage(),
+                AverageCpuUsage = _metricsBuffer.GetAverageCpuUsage(),
+                CpuUsageTrend = _metricsBuffer.GetCpuUsageTrend(),
+
+                MemoryUsagePercent = metrics.MemoryUsageMB,
+                PeakMemoryUsage = _metricsBuffer.GetPeakMemoryUsage(),
+                AverageMemoryUsage = _metricsBuffer.GetAverageMemoryUsage(),
+                MemoryUsageTrend = _metricsBuffer.GetMemoryUsageTrend(),
+
+                DiskUtilizationPercent = metrics.DiskIoMBPS,
+                PeakDiskUtilization = _metricsBuffer.GetPeakDiskUtilization(),
+                AverageDiskUtilization = _metricsBuffer.GetAverageDiskUtilization(),
+                DiskUtilizationTrend = _metricsBuffer.GetDiskUtilizationTrend(),
+
+                NetworkUtilizationPercent = metrics.NetworkBandwidthUsage,
+                PeakNetworkUtilization = _metricsBuffer.GetPeakNetworkUtilization(),
+                AverageNetworkUtilization = _metricsBuffer.GetAverageNetworkUtilization(),
+                NetworkUtilizationTrend = _metricsBuffer.GetNetworkUtilizationTrend()
             };
         }
 
-        public IEnumerable<MetricsSummary> GetHistoricalMetrics(TimeSpan timeWindow)
+        public async Task<double> GetAverageResponseTimeAsync(TimeRange timeRange)
         {
-            var cutoff = DateTime.UtcNow - timeWindow;
-            return _historicalMetrics
-                .Where(m => m.Timestamp >= cutoff)
-                .Select(m => m.Metrics);
+            return await _resourceAnalytics.GetAverageResponseTimeAsync(timeRange.Start, timeRange.End);
         }
 
-        private void PruneHistoricalMetrics(object state)
+        public async Task<double> GetThroughputAsync(TimeRange timeRange)
         {
-            var cutoff = DateTime.UtcNow.AddHours(-MetricsRetentionHours);
-            while (_historicalMetrics.TryPeek(out var metrics) && metrics.Timestamp < cutoff)
-            {
-                _historicalMetrics.TryDequeue(out _);
-            }
+            return await _resourceAnalytics.GetThroughputAsync(timeRange.Start, timeRange.End);
         }
 
-        private Dictionary<string, MiddlewareMetrics> GetCurrentMiddlewareMetrics()
+        public async Task<double> GetErrorRateAsync(TimeRange timeRange)
         {
-            return _middlewareMetrics.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+            return await _resourceAnalytics.GetErrorRateAsync(timeRange.Start, timeRange.End);
         }
 
-        private ResourceMetrics GetLatestResourceMetrics()
+        public async Task<int> GetConcurrentOperationsAsync()
         {
-            return _historicalMetrics.LastOrDefault()?.Metrics.ResourceMetrics ?? new ResourceMetrics();
+            return _metricsBuffer.GetConcurrentOperations();
         }
 
-        private class TimestampedMetrics
+        public async Task<double> GetResourceEfficiencyAsync(TimeRange timeRange)
         {
-            public DateTime Timestamp { get; set; }
-            public MetricsSummary Metrics { get; set; }
+            return await _resourceAnalytics.GetResourceEfficiencyAsync(timeRange.Start, timeRange.End);
         }
-    }
-
-    public class MiddlewareMetrics
-    {
-        public long SuccessCount;
-        public long FailureCount;
-        public long RetryCount;
-        private bool _circuitBreakerOpen;
-        private readonly ConcurrentQueue<double> _executionTimes = new();
-        private const int MaxStoredExecutionTimes = 1000;
-
-        public void AddExecutionTime(TimeSpan duration)
-        {
-            _executionTimes.Enqueue(duration.TotalMilliseconds);
-            while (_executionTimes.Count > MaxStoredExecutionTimes)
-            {
-                _executionTimes.TryDequeue(out _);
-            }
-        }
-
-        public void UpdateCircuitBreakerStatus(bool isOpen)
-        {
-            _circuitBreakerOpen = isOpen;
-        }
-
-        public double AverageExecutionTime => _executionTimes.Any() ? _executionTimes.Average() : 0;
-        public bool CircuitBreakerOpen => _circuitBreakerOpen;
-    }
-
-    public class MetricsSummary
-    {
-        public Dictionary<string, MiddlewareMetrics> MiddlewareMetrics { get; set; }
-        public ResourceMetrics ResourceMetrics { get; set; }
-    }
-
-    public class ResourceMetrics
-    {
-        public double CpuUsagePercent { get; set; }
-        public double MemoryUsageMB { get; set; }
-        public double DiskIoMBPS { get; set; }
-        public int ActiveThreads { get; set; }
     }
 }
