@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using CodeBuddy.Core.Models;
 using CodeBuddy.Core.Implementation.CodeValidation.Monitoring;
+using CodeBuddy.Core.Implementation.CodeValidation.Memory;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation
 {
@@ -15,6 +17,18 @@ namespace CodeBuddy.Core.Implementation.CodeValidation
         public MetricsCollection Metrics { get; } = new MetricsCollection();
         public ValidationResult Result { get; set; } = new ValidationResult();
         public bool IsCriticalValidation { get; set; }
+        public MemoryProfile MemoryProfile { get; } = new MemoryProfile();
+        public ConcurrentDictionary<string, IDisposable> ManagedResources { get; }
+            = new ConcurrentDictionary<string, IDisposable>();
+
+        public void Dispose()
+        {
+            foreach (var resource in ManagedResources.Values)
+            {
+                resource?.Dispose();
+            }
+            ManagedResources.Clear();
+        }
     }
 
     public class MetricsCollection
@@ -61,5 +75,36 @@ namespace CodeBuddy.Core.Implementation.CodeValidation
     {
         public DateTime Timestamp { get; set; }
         public ResourceMetrics Metrics { get; set; }
+    }
+
+    public class MemoryProfile
+    {
+        public Dictionary<string, MemoryAllocationInfo> AllocationPatterns { get; }
+            = new Dictionary<string, MemoryAllocationInfo>();
+        public List<MemoryUsageSnapshot> UsageHistory { get; }
+            = new List<MemoryUsageSnapshot>();
+        public double PeakMemoryUsage { get; set; }
+        public int ResourceLeakWarnings { get; set; }
+        public Dictionary<string, int> ObjectAllocationCounts { get; }
+            = new Dictionary<string, int>();
+    }
+
+    public class MemoryAllocationInfo
+    {
+        public long TotalBytes { get; set; }
+        public int AllocationCount { get; set; }
+        public DateTime FirstSeen { get; set; }
+        public DateTime LastSeen { get; set; }
+        public bool IsPotentialLeak { get; set; }
+        public string StackTrace { get; set; }
+    }
+
+    public class MemoryUsageSnapshot
+    {
+        public DateTime Timestamp { get; set; }
+        public long ManagedMemoryBytes { get; set; }
+        public long UnmanagedMemoryBytes { get; set; }
+        public int ActiveResourceCount { get; set; }
+        public double FragmentationPercent { get; set; }
     }
 }
