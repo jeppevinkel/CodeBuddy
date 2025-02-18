@@ -22,9 +22,9 @@ jobs:
       run: dotnet restore
       
     - name: Build
-      run: dotnet build --no-restore --configuration Release
+      run: dotnet build --no-restore
       
-    - name: Build CLI
+    - name: Build CLI Release
       run: dotnet publish CodeBuddy.CLI/CodeBuddy.CLI.csproj -c Release -o publish
       
     - name: Upload CLI artifact
