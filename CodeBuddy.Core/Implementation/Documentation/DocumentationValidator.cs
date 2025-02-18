@@ -301,8 +301,11 @@ namespace CodeBuddy.Core.Implementation.Documentation
 
         private async Task ValidateCodeExamples(DocumentationSet docs, ValidationResult result)
         {
+            var signatureValidator = new CodeExampleSignatureValidator(_solution);
+
             foreach (var example in docs.Examples)
             {
+                // Validate example structure and syntax
                 var exampleValidation = await _exampleValidator.ValidateAsync(example);
                 if (!exampleValidation.IsValid)
                 {
@@ -312,11 +315,51 @@ namespace CodeBuddy.Core.Implementation.Documentation
                         {
                             Type = IssueType.InvalidExample,
                             Component = $"Example: {example.Title}",
-                            Message = error
+                            Message = error,
+                            Severity = IssueSeverity.Error
                         });
                     }
                 }
+
+                // Validate API signatures in the example
+                if (example.Language.Equals("csharp", StringComparison.OrdinalIgnoreCase))
+                {
+                    var signatureIssues = await signatureValidator.ValidateCodeExampleAsync(
+                        example.Code,
+                        $"Example: {example.Title}");
+
+                    foreach (var issue in signatureIssues)
+                    {
+                        result.Issues.Add(new DocumentationIssue
+                        {
+                            Type = IssueType.InvalidApiSignature,
+                            Component = issue.Context,
+                            Message = $"Line {issue.CodeLocation}: {issue.Message}",
+                            Severity = IssueSeverity.Error
+                        });
+                    }
+                }
+
+                // Generate updated example if needed
+                if (HasOutdatedApiCalls(example))
+                {
+                    var updatedExample = await _exampleGenerator.GenerateUpdatedExampleAsync(example);
+                    result.Issues.Add(new DocumentationIssue
+                    {
+                        Type = IssueType.OutdatedExample,
+                        Component = $"Example: {example.Title}",
+                        Message = "Code example uses outdated API calls. Suggested update available.",
+                        Severity = IssueSeverity.Warning,
+                        Suggestion = updatedExample.Code
+                    });
+                }
             }
+        }
+
+        private bool HasOutdatedApiCalls(CodeExample example)
+        {
+            // Implementation to detect outdated API calls
+            return false;
         }
 
         private async Task ValidateCrossReferences(DocumentationSet docs, ValidationResult result)
