@@ -8,7 +8,7 @@ using CodeBuddy.Core.Implementation.CodeValidation.Coverage;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation;
 
-public class ValidationPipeline
+public class ValidationPipeline : IDisposable
 {
     private readonly ILogger<ValidationPipeline> _logger;
     private readonly List<IValidationMiddleware> _middleware;
@@ -18,7 +18,14 @@ public class ValidationPipeline
     private readonly IMetricsAggregator _metricsAggregator;
     private readonly IResourceAlertManager _alertManager;
     private readonly IResourceAnalytics _resourceAnalytics;
-    private readonly IValidationCache _validationCache;
+    private readonly IDistributedCache _distributedCache;
+    private readonly IClusterCoordinator _clusterCoordinator;
+    private readonly ILoadBalancer _loadBalancer;
+    private readonly IDistributedTracer _distributedTracer;
+    private readonly IHealthMonitor _healthMonitor;
+    private readonly string _nodeId;
+    private bool _isLeader;
+    private Timer _leaderElectionTimer;
     
     // Resource throttling state
     private readonly SemaphoreSlim _validationThrottle;
@@ -34,7 +41,11 @@ public class ValidationPipeline
         IMetricsAggregator metricsAggregator,
         IResourceAlertManager alertManager,
         IResourceAnalytics resourceAnalytics,
-        IValidationCache validationCache,
+        IDistributedCache distributedCache,
+        IClusterCoordinator clusterCoordinator,
+        ILoadBalancer loadBalancer,
+        IDistributedTracer distributedTracer,
+        IHealthMonitor healthMonitor,
         ITestCoverageGenerator testCoverageGenerator)
     {
         _logger = logger;
@@ -45,8 +56,15 @@ public class ValidationPipeline
         _metricsAggregator = metricsAggregator;
         _alertManager = alertManager;
         _resourceAnalytics = resourceAnalytics;
-        _validationCache = validationCache;
+        _distributedCache = distributedCache;
+        _clusterCoordinator = clusterCoordinator;
+        _loadBalancer = loadBalancer;
+        _distributedTracer = distributedTracer;
+        _healthMonitor = healthMonitor;
         TestCoverageGenerator = testCoverageGenerator;
+        
+        // Generate unique node ID
+        _nodeId = GenerateNodeId();
         
         // Initialize resource throttling
         _validationThrottle = new SemaphoreSlim(config.MaxConcurrentValidations);
@@ -54,8 +72,8 @@ public class ValidationPipeline
         _criticalValidationReservations = new ConcurrentDictionary<string, int>();
         _lastThrottlingAdjustment = DateTime.UtcNow;
         
-        // Start resource monitoring
-        StartResourceMonitoring();
+        // Start cluster coordination
+        InitializeClusterNode();
     }
 
     public void AddMiddleware(IValidationMiddleware middleware)
@@ -66,15 +84,29 @@ public class ValidationPipeline
 
     public async Task<ValidationResult> ExecuteAsync(ValidationContext context)
     {
-        // Try to get result from cache first
+        using var trace = _distributedTracer.StartTrace("ValidationPipeline.Execute");
+        trace.SetTag("nodeId", _nodeId);
+        
+        // Try to get result from distributed cache first
         var codeHash = ComputeCodeHash(context.Code);
-        var (found, cachedResult) = await _validationCache.TryGetAsync(codeHash, context.Options);
+        var (found, cachedResult) = await _distributedCache.TryGetAsync(codeHash, context.Options);
         
         if (found)
         {
-            _logger.LogInformation("Validation result found in cache for code hash: {CodeHash}", codeHash);
+            trace.SetTag("cache_hit", true);
+            _logger.LogInformation("Validation result found in distributed cache for code hash: {CodeHash}", codeHash);
             return cachedResult;
         }
+
+        // Check if we should handle this validation or forward to another node
+        if (!await ShouldHandleValidation(context))
+        {
+            trace.SetTag("forwarded", true);
+            var targetNode = await _loadBalancer.SelectNodeAsync(context);
+            return await ForwardValidationToNode(context, targetNode);
+        }
+
+        trace.SetTag("handling_node", true);
 
         var result = new ValidationResult
         {
@@ -149,7 +181,8 @@ public class ValidationPipeline
             // Cache the result before returning
             if (result.IsValid || result.IsPartialSuccess)
             {
-                await _validationCache.SetAsync(codeHash, context.Options, result);
+                await _distributedCache.SetAsync(codeHash, context.Options, result);
+                await _clusterCoordinator.BroadcastValidationResult(codeHash, result);
             }
             
             return result;
@@ -417,6 +450,163 @@ public class ValidationPipeline
         public double MemoryUsageMB { get; set; }
         public double DiskIoMBPS { get; set; }
         public int ActiveThreads { get; set; }
+    }
+
+    private string GenerateNodeId()
+    {
+        return $"{Environment.MachineName}-{Guid.NewGuid()}";
+    }
+
+    private void InitializeClusterNode()
+    {
+        // Register with cluster coordinator
+        _clusterCoordinator.RegisterNode(_nodeId, new NodeCapabilities
+        {
+            MaxConcurrentValidations = _config.MaxConcurrentValidations,
+            SupportedLanguages = GetSupportedLanguages(),
+            ResourceCapacity = new ResourceCapacity
+            {
+                CpuCores = Environment.ProcessorCount,
+                TotalMemoryMB = GetTotalMemory(),
+                DiskSpaceGB = GetAvailableDiskSpace()
+            }
+        });
+
+        // Start leader election process
+        _leaderElectionTimer = new Timer(async _ =>
+        {
+            try
+            {
+                _isLeader = await _clusterCoordinator.ParticipateInLeaderElection(_nodeId);
+                if (_isLeader)
+                {
+                    await PerformLeaderDuties();
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Leader election failed");
+            }
+        }, null, TimeSpan.Zero, TimeSpan.FromSeconds(30));
+
+        // Start health monitoring
+        StartResourceMonitoring();
+    }
+
+    private async Task<bool> ShouldHandleValidation(ValidationContext context)
+    {
+        // Check if we're the designated node for this validation
+        var assignment = await _loadBalancer.GetAssignmentAsync(context);
+        if (assignment.AssignedNodeId == _nodeId)
+        {
+            return true;
+        }
+
+        // If the assigned node is down, we might need to handle it
+        if (!await _healthMonitor.IsNodeHealthy(assignment.AssignedNodeId))
+        {
+            await _loadBalancer.RebalanceWorkload();
+            assignment = await _loadBalancer.GetAssignmentAsync(context);
+            return assignment.AssignedNodeId == _nodeId;
+        }
+
+        return false;
+    }
+
+    private async Task<ValidationResult> ForwardValidationToNode(ValidationContext context, NodeAssignment targetNode)
+    {
+        try
+        {
+            return await _clusterCoordinator.ForwardValidationRequest(targetNode.NodeId, context);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to forward validation to node {NodeId}", targetNode.NodeId);
+            
+            // If forwarding fails, handle locally as fallback
+            _logger.LogInformation("Handling validation locally as fallback");
+            return await ProcessValidationLocally(context);
+        }
+    }
+
+    private async Task PerformLeaderDuties()
+    {
+        // Coordinate cluster-wide operations
+        await Task.WhenAll(
+            _loadBalancer.RebalanceWorkload(),
+            _healthMonitor.PerformClusterHealthCheck(),
+            _clusterCoordinator.UpdateClusterState(),
+            _distributedCache.OptimizeDistribution()
+        );
+    }
+
+    private async Task ProcessValidationLocally(ValidationContext context)
+    {
+        // Implementation of local validation processing
+        var result = new ValidationResult
+        {
+            State = ValidationState.InProgress,
+            Language = context.Language
+        };
+
+        try
+        {
+            if (!await AcquireResourcesAsync(context))
+            {
+                result.State = ValidationState.Failed;
+                result.IsValid = false;
+                result.Issues.Add(new ValidationIssue
+                {
+                    Severity = ValidationSeverity.Error,
+                    Message = "Validation rejected due to resource constraints"
+                });
+                return result;
+            }
+
+            // Execute the validation pipeline
+            ValidationDelegate pipeline = BuildPipeline(context);
+            return await pipeline(context);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Local validation processing failed");
+            result.State = ValidationState.Failed;
+            result.IsValid = false;
+            result.Issues.Add(new ValidationIssue
+            {
+                Severity = ValidationSeverity.Error,
+                Message = "Local validation processing failed: " + ex.Message
+            });
+            return result;
+        }
+        finally
+        {
+            ReleaseResources(context);
+        }
+    }
+
+    private string[] GetSupportedLanguages()
+    {
+        // Return list of languages this node can validate
+        return new[] { "CSharp", "JavaScript", "Python" };
+    }
+
+    private long GetTotalMemory()
+    {
+        return GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024 * 1024); // Convert to MB
+    }
+
+    private long GetAvailableDiskSpace()
+    {
+        var drive = new DriveInfo(AppDomain.CurrentDomain.BaseDirectory);
+        return drive.AvailableFreeSpace / (1024 * 1024 * 1024); // Convert to GB
+    }
+
+    public void Dispose()
+    {
+        _leaderElectionTimer?.Dispose();
+        _validationThrottle?.Dispose();
+        _clusterCoordinator.UnregisterNode(_nodeId);
     }
 
     private void StartResourceMonitoring()
