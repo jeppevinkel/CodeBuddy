@@ -17,4 +17,17 @@ public class ValidationOptions
     public Dictionary<string, object> CustomRules { get; set; } = new();
     public int SecuritySeverityThreshold { get; set; } = 7;
     public string[] ExcludeRules { get; set; } = Array.Empty<string>();
+
+    // New security-specific options
+    public SecurityValidationOptions SecurityOptions { get; set; } = new();
+}
+
+public class SecurityValidationOptions
+{
+    public bool ScanDependencies { get; set; } = true;
+    public bool IncludeRuleDescriptions { get; set; } = true;
+    public string[] ExcludeVulnerabilityTypes { get; set; } = Array.Empty<string>();
+    public SecurityScanLevel ScanLevel { get; set; } = SecurityScanLevel.Standard;
+    public Dictionary<string, int> VulnerabilityThresholds { get; set; } = new();
+    public bool BlockOnCriticalVulnerabilities { get; set; } = true;
 }

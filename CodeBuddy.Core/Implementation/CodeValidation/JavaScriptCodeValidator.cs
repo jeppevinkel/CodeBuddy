@@ -5,7 +5,8 @@ namespace CodeBuddy.Core.Implementation.CodeValidation;
 
 public class JavaScriptCodeValidator : BaseCodeValidator
 {
-    public JavaScriptCodeValidator(ILogger logger) : base(logger)
+    public JavaScriptCodeValidator(ILogger logger)
+        : base(logger, new JavaScriptSecurityScanner())
     {
     }
 

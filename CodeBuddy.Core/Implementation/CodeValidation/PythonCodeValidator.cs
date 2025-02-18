@@ -5,7 +5,8 @@ namespace CodeBuddy.Core.Implementation.CodeValidation;
 
 public class PythonCodeValidator : BaseCodeValidator
 {
-    public PythonCodeValidator(ILogger logger) : base(logger)
+    public PythonCodeValidator(ILogger logger)
+        : base(logger, new PythonSecurityScanner())
     {
     }
 

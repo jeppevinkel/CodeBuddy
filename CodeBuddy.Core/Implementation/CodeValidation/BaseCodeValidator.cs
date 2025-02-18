@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
 using CodeBuddy.Core.Models;
+using CodeBuddy.Core.Implementation.CodeValidation.Security;
 using Microsoft.Extensions.Logging;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation;
@@ -11,10 +12,12 @@ namespace CodeBuddy.Core.Implementation.CodeValidation;
 public abstract class BaseCodeValidator : ICodeValidator
 {
     protected readonly ILogger _logger;
+    protected readonly ISecurityScanner _securityScanner;
 
-    protected BaseCodeValidator(ILogger logger)
+    protected BaseCodeValidator(ILogger logger, ISecurityScanner securityScanner)
     {
         _logger = logger;
+        _securityScanner = securityScanner;
     }
 
     private readonly Stopwatch _totalStopwatch = new();
@@ -84,7 +87,70 @@ public abstract class BaseCodeValidator : ICodeValidator
     }
 
     protected abstract Task ValidateSyntaxAsync(string code, ValidationResult result);
-    protected abstract Task ValidateSecurityAsync(string code, ValidationResult result);
+    protected virtual async Task ValidateSecurityAsync(string code, ValidationResult result)
+    {
+        try
+        {
+            var scanOptions = new SecurityScanOptions
+            {
+                SeverityThreshold = 1, // We'll filter by severity in the result processing
+                IncludeRuleDescriptions = true,
+                ScanDependencies = true,
+                ScanLevel = SecurityScanLevel.Thorough
+            };
+
+            var scanResult = await _securityScanner.ScanAsync(code, scanOptions);
+
+            // Convert security vulnerabilities to validation issues
+            foreach (var vulnerability in scanResult.Vulnerabilities)
+            {
+                result.Issues.Add(new ValidationIssue
+                {
+                    Code = vulnerability.Id,
+                    Message = $"{vulnerability.Title}: {vulnerability.Description}",
+                    Location = vulnerability.AffectedCodeLocation,
+                    Severity = ConvertSeverityToValidationSeverity(vulnerability.Severity),
+                    Category = "Security",
+                    Type = vulnerability.VulnerabilityType,
+                    AdditionalInfo = new Dictionary<string, string>
+                    {
+                        ["CWE"] = vulnerability.CWE,
+                        ["OWASP"] = vulnerability.OWASP,
+                        ["Remediation"] = vulnerability.RemediationGuidance
+                    }
+                });
+            }
+
+            // Add security scan statistics
+            result.Statistics.SecurityVulnerabilities = scanResult.Vulnerabilities.Count;
+            foreach (var stat in scanResult.VulnerabilityStatistics)
+            {
+                result.Statistics.SecurityBreakdown[stat.Key] = stat.Value;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during security validation");
+            result.Issues.Add(new ValidationIssue
+            {
+                Code = "SEC001",
+                Message = $"Security validation failed: {ex.Message}",
+                Severity = ValidationSeverity.Error,
+                Category = "Security"
+            });
+        }
+    }
+
+    private ValidationSeverity ConvertSeverityToValidationSeverity(int securitySeverity)
+    {
+        return securitySeverity switch
+        {
+            >= 9 => ValidationSeverity.SecurityVulnerability,
+            >= 7 => ValidationSeverity.Error,
+            >= 4 => ValidationSeverity.Warning,
+            _ => ValidationSeverity.Information
+        };
+    }
     protected abstract Task ValidateStyleAsync(string code, ValidationResult result);
     protected abstract Task ValidateBestPracticesAsync(string code, ValidationResult result);
     protected abstract Task ValidateErrorHandlingAsync(string code, ValidationResult result);

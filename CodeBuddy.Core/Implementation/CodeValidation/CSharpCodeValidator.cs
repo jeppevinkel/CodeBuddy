@@ -13,7 +13,8 @@ public class CSharpCodeValidator : BaseCodeValidator
     private readonly CSharpParseOptions _parseOptions;
     private readonly List<DiagnosticAnalyzer> _analyzers;
 
-    public CSharpCodeValidator(ILogger logger) : base(logger)
+    public CSharpCodeValidator(ILogger logger) 
+        : base(logger, new CSharpSecurityScanner())
     {
         _parseOptions = CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Latest);
         _analyzers = LoadAnalyzers();
@@ -76,6 +77,10 @@ public class CSharpCodeValidator : BaseCodeValidator
 
     protected override async Task ValidateSecurityAsync(string code, ValidationResult result)
     {
+        // First run the base security validation which uses our new security scanner
+        await base.ValidateSecurityAsync(code, result);
+
+        // Then run the existing Roslyn security analyzers for additional coverage
         var securityAnalyzers = _analyzers.Where(a => a.GetType().Assembly.GetName().Name?.Contains("SecurityCodeScan") == true);
         var issues = await AnalyzeCodeWithAnalyzers(code, securityAnalyzers);
 
@@ -92,8 +97,8 @@ public class CSharpCodeValidator : BaseCodeValidator
             });
         }
 
-        result.Statistics.SecurityIssues = issues.Count();
-        result.IsValid = result.IsValid && !issues.Any();
+        result.Statistics.SecurityIssues = result.Issues.Count(i => i.Severity == ValidationSeverity.SecurityVulnerability);
+        result.IsValid = result.IsValid && !result.Issues.Any(i => i.Severity == ValidationSeverity.SecurityVulnerability);
     }
 
     protected override async Task ValidateStyleAsync(string code, ValidationResult result)
