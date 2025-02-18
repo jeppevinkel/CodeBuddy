@@ -14,6 +14,7 @@ public class ValidationPipeline
     private readonly ConcurrentDictionary<string, MiddlewareMetrics> _metrics;
     private readonly ValidationResilienceConfig _config;
     private readonly IMetricsAggregator _metricsAggregator;
+    private readonly IResourceAlertManager _alertManager;
     
     // Resource throttling state
     private readonly SemaphoreSlim _validationThrottle;
@@ -25,7 +26,8 @@ public class ValidationPipeline
     public ValidationPipeline(
         ILogger<ValidationPipeline> logger,
         ValidationResilienceConfig config,
-        IMetricsAggregator metricsAggregator)
+        IMetricsAggregator metricsAggregator,
+        IResourceAlertManager alertManager)
     {
         _logger = logger;
         _middleware = new List<IValidationMiddleware>();
@@ -33,6 +35,7 @@ public class ValidationPipeline
         _metrics = new ConcurrentDictionary<string, MiddlewareMetrics>();
         _config = config;
         _metricsAggregator = metricsAggregator;
+        _alertManager = alertManager;
         
         // Initialize resource throttling
         _validationThrottle = new SemaphoreSlim(config.MaxConcurrentValidations);
@@ -501,7 +504,7 @@ public class ValidationPipeline
         };
     }
 
-    private void EmitResourceMetrics()
+    private async void EmitResourceMetrics()
     {
         var metrics = new ResourceMetrics
         {
@@ -511,6 +514,14 @@ public class ValidationPipeline
             ActiveThreads = GetActiveThreadCount()
         };
         _metricsAggregator.RecordResourceUtilization(metrics);
+
+        // Send metrics to alert manager for analysis
+        await _alertManager.ProcessMetricsAsync(new Dictionary<ResourceMetricType, double>
+        {
+            [ResourceMetricType.CPU] = metrics.CpuUsagePercent,
+            [ResourceMetricType.Memory] = metrics.MemoryUsageMB,
+            [ResourceMetricType.DiskIO] = metrics.DiskIoMBPS
+        }, "ValidationPipeline");
     }
 
     private double GetCpuUsage()
