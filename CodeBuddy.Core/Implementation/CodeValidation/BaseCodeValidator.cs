@@ -93,6 +93,7 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     private readonly ResourcePreallocationManager _resourceManager;
     private readonly ObjectPool<byte[]> _bufferPool;
     private readonly MemoryPressureMonitor _memoryMonitor;
+    private readonly ResourceMonitoringDashboard _monitoringDashboard;
     
     // Enhanced memory thresholds with progressive cleanup
     private const long LowMemoryThresholdBytes = 300 * 1024 * 1024; // 300MB
@@ -125,6 +126,16 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
         _progress = new FileOperationProgress();
         _validationQueue = new BlockingCollection<ValidationTask>(MaxQueueSize);
         _queueProcessingCts = new CancellationTokenSource();
+        
+        // Initialize the monitoring dashboard with custom thresholds
+        _monitoringDashboard = new ResourceMonitoringDashboard(logger, new ResourceThresholds
+        {
+            MemoryWarningThresholdBytes = MemoryThresholdBytes,
+            MemoryCriticalThresholdBytes = CriticalMemoryThresholdBytes,
+            MaxHandleCount = 1000,
+            MaxTemporaryFiles = MaxTemporaryFiles,
+            QueueSaturationThreshold = 0.8
+        });
         
         // Initialize resource preallocation manager
         _resourceManager = new ResourcePreallocationManager(
@@ -704,6 +715,12 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
             
             await _cleanupLock.WaitAsync().ConfigureAwait(false);
             
+            // Dispose monitoring dashboard
+            if (_monitoringDashboard != null)
+            {
+                await _monitoringDashboard.DisposeAsync().ConfigureAwait(false);
+            }
+            
             // Dispose all tracked disposables
             while (_disposables.TryDequeue(out var disposable))
             {
@@ -777,22 +794,37 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
 
     private async Task MonitorResourcesAsync(CancellationToken cancellationToken)
     {
-        var currentUsage = await _resourceTracker.GetCurrentMemoryUsageAsync();
+        // Get current metrics via dashboard
+        var metrics = await _monitoringDashboard.GetCurrentMetricsAsync();
         
-        if (currentUsage > CriticalMemoryThresholdBytes)
+        // Update validation queue metrics
+        metrics.ValidationQueueMetrics["QueueLength"] = _validationQueue.Count;
+        metrics.ValidationQueueMetrics["QueueUtilization"] = _validationQueue.Count / (double)MaxQueueSize;
+        
+        // Update resource pool metrics
+        metrics.ResourcePoolUtilization["TemporaryFiles"] = _temporaryFiles.Count;
+        metrics.ResourcePoolUtilization["BufferPool"] = _bufferPool.Count;
+        metrics.ResourcePoolUtilization["DisposableQueue"] = _disposables.Count;
+        
+        if (metrics.HealthStatus != "Healthy")
         {
-            await EmergencyCleanupAsync();
-        }
-        else if (currentUsage > MemoryThresholdBytes)
-        {
-            await GradualCleanupAsync();
+            if (metrics.MemoryUsageBytes > CriticalMemoryThresholdBytes)
+            {
+                await EmergencyCleanupAsync();
+            }
+            else if (metrics.MemoryUsageBytes > MemoryThresholdBytes)
+            {
+                await GradualCleanupAsync();
+            }
         }
 
-        // Log resource usage for monitoring
+        // Log current health status
         _logger.LogInformation(
-            "Resource Usage - Memory: {MemoryMB}MB, Handles: {Handles}, Files: {Files}",
-            currentUsage / (1024 * 1024),
-            _resourceTracker.HandleCount,
+            "Resource Health: {Status} - Memory: {MemoryMB}MB, CPU: {CpuPercent}%, Handles: {Handles}, Files: {Files}",
+            metrics.HealthStatus,
+            metrics.MemoryUsageBytes / (1024 * 1024),
+            metrics.CpuUsagePercent,
+            metrics.ActiveHandles,
             _temporaryFiles.Count);
     }
 
