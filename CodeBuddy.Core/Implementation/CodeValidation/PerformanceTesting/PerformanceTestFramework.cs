@@ -9,12 +9,44 @@ using System.IO;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation.PerformanceTesting;
 
+public enum WorkloadType
+{
+    CpuIntensive,
+    MemoryIntensive,
+    IoIntensive,
+    Mixed
+}
+
+public enum ArrivalPattern
+{
+    Constant,
+    LinearRamp,
+    Burst,
+    Exponential,
+    Random
+}
+
+public class LoadTestConfiguration
+{
+    public WorkloadType WorkloadType { get; set; }
+    public ArrivalPattern ArrivalPattern { get; set; }
+    public int InitialConcurrentUsers { get; set; }
+    public int PeakConcurrentUsers { get; set; }
+    public TimeSpan RampUpTime { get; set; }
+    public TimeSpan SustainTime { get; set; }
+    public TimeSpan RampDownTime { get; set; }
+    public bool SimulateNetworkLatency { get; set; }
+    public bool SimulateFailures { get; set; }
+    public Dictionary<string, int> ResourceThrottlingLimits { get; set; }
+}
+
 public class PerformanceTestFramework
 {
     private readonly ILogger _logger;
     private readonly string _historyFilePath;
     private readonly Dictionary<string, ICodeValidator> _validators;
     private readonly PerformanceTestMetricsCollector _metricsCollector;
+    private readonly Random _random;
 
     public PerformanceTestFramework(
         ILogger logger,
@@ -25,6 +57,7 @@ public class PerformanceTestFramework
         _validators = validators;
         _historyFilePath = historyFilePath;
         _metricsCollector = new PerformanceTestMetricsCollector();
+        _random = new Random();
     }
 
     public async Task<PerformanceTestReport> RunBaselineTests(Dictionary<string, string> sampleCode)
@@ -279,5 +312,207 @@ public class PerformanceTestFramework
         return current.ExecutionTimeMs > baseline.ExecutionTimeMs * threshold ||
                current.PeakMemoryUsageBytes > baseline.PeakMemoryUsageBytes * threshold ||
                current.CpuUtilizationPercent > baseline.CpuUtilizationPercent * threshold;
+    }
+
+    public async Task<PerformanceTestReport> RunLoadTest(
+        Dictionary<string, string> sampleCode,
+        LoadTestConfiguration config)
+    {
+        var report = new PerformanceTestReport
+        {
+            TestName = $"Load Test - {config.WorkloadType}",
+            StartTime = DateTime.UtcNow,
+            TestResults = new List<PerformanceTestResult>(),
+            Configuration = config
+        };
+
+        var startTime = DateTime.UtcNow;
+        var totalDuration = config.RampUpTime + config.SustainTime + config.RampDownTime;
+        var activeTasks = new List<Task>();
+        var testPhases = new[] { "RampUp", "Sustain", "RampDown" };
+
+        foreach (var phase in testPhases)
+        {
+            var phaseDuration = phase switch
+            {
+                "RampUp" => config.RampUpTime,
+                "Sustain" => config.SustainTime,
+                "RampDown" => config.RampDownTime,
+                _ => TimeSpan.Zero
+            };
+
+            var phaseStartTime = DateTime.UtcNow;
+            
+            while (DateTime.UtcNow - phaseStartTime < phaseDuration)
+            {
+                var targetConcurrency = CalculateTargetConcurrency(phase, config, 
+                    DateTime.UtcNow - phaseStartTime, phaseDuration);
+
+                // Adjust active tasks to match target concurrency
+                while (activeTasks.Count < targetConcurrency)
+                {
+                    foreach (var (language, validator) in _validators)
+                    {
+                        if (!sampleCode.TryGetValue(language, out var code))
+                            continue;
+
+                        var task = ExecuteLoadTest(validator, code, language, config);
+                        activeTasks.Add(task);
+                    }
+                }
+
+                // Collect completed tasks and their metrics
+                var completed = activeTasks.Where(t => t.IsCompleted).ToList();
+                foreach (var task in completed)
+                {
+                    activeTasks.Remove(task);
+                    var metrics = await _metricsCollector.CollectMetrics();
+                    report.TestResults.Add(new PerformanceTestResult
+                    {
+                        Phase = phase,
+                        TestType = config.WorkloadType.ToString(),
+                        Timestamp = DateTime.UtcNow,
+                        Metrics = metrics,
+                        AdditionalData = new Dictionary<string, object>
+                        {
+                            { "ConcurrentUsers", targetConcurrency },
+                            { "ArrivalPattern", config.ArrivalPattern.ToString() }
+                        }
+                    });
+                }
+
+                await Task.Delay(100); // Prevent tight loop
+            }
+        }
+
+        // Wait for any remaining tasks to complete
+        await Task.WhenAll(activeTasks);
+        
+        report.EndTime = DateTime.UtcNow;
+        await SaveTestHistory(report);
+        return report;
+    }
+
+    private async Task ExecuteLoadTest(
+        ICodeValidator validator, 
+        string code, 
+        string language,
+        LoadTestConfiguration config)
+    {
+        try
+        {
+            if (config.SimulateNetworkLatency)
+            {
+                await SimulateNetworkLatency();
+            }
+
+            var options = GenerateWorkloadOptions(config.WorkloadType);
+
+            if (config.SimulateFailures && _random.NextDouble() < 0.05) // 5% failure rate
+            {
+                throw new SimulatedFailureException("Simulated validation failure");
+            }
+
+            await validator.ValidateAsync(code, language, options);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Load test execution failed for {Language}", language);
+            throw;
+        }
+    }
+
+    private ValidationOptions GenerateWorkloadOptions(WorkloadType workloadType)
+    {
+        var options = new ValidationOptions
+        {
+            ValidateSyntax = true,
+            ValidateSecurity = true,
+            ValidateStyle = true,
+            ValidateBestPractices = true,
+            ValidateErrorHandling = true
+        };
+
+        // Add workload-specific settings
+        switch (workloadType)
+        {
+            case WorkloadType.CpuIntensive:
+                options.EnableDeepAnalysis = true;
+                options.EnableComplexityAnalysis = true;
+                break;
+
+            case WorkloadType.MemoryIntensive:
+                options.EnableFullAstAnalysis = true;
+                options.EnableDataFlowAnalysis = true;
+                break;
+
+            case WorkloadType.IoIntensive:
+                options.EnableDependencyAnalysis = true;
+                options.EnableExternalValidation = true;
+                break;
+
+            case WorkloadType.Mixed:
+                options.EnableDeepAnalysis = true;
+                options.EnableFullAstAnalysis = true;
+                options.EnableDependencyAnalysis = true;
+                break;
+        }
+
+        return options;
+    }
+
+    private async Task SimulateNetworkLatency()
+    {
+        // Simulate variable network latency with occasional spikes
+        var baseLatency = _random.Next(50, 150); // Base latency between 50-150ms
+        var spike = _random.NextDouble() < 0.1 ? _random.Next(100, 500) : 0; // 10% chance of spike
+        await Task.Delay(baseLatency + spike);
+    }
+
+    private int CalculateTargetConcurrency(
+        string phase,
+        LoadTestConfiguration config,
+        TimeSpan elapsed,
+        TimeSpan phaseDuration)
+    {
+        var progress = elapsed.TotalMilliseconds / phaseDuration.TotalMilliseconds;
+        progress = Math.Min(Math.Max(progress, 0), 1); // Ensure between 0 and 1
+
+        return config.ArrivalPattern switch
+        {
+            ArrivalPattern.Constant => phase == "Sustain" 
+                ? config.PeakConcurrentUsers 
+                : config.InitialConcurrentUsers,
+
+            ArrivalPattern.LinearRamp => phase switch
+            {
+                "RampUp" => (int)(config.InitialConcurrentUsers + 
+                    (config.PeakConcurrentUsers - config.InitialConcurrentUsers) * progress),
+                "Sustain" => config.PeakConcurrentUsers,
+                "RampDown" => (int)(config.PeakConcurrentUsers - 
+                    (config.PeakConcurrentUsers - config.InitialConcurrentUsers) * progress),
+                _ => config.InitialConcurrentUsers
+            },
+
+            ArrivalPattern.Burst => phase == "Sustain" 
+                ? (progress * 10 % 1 < 0.2 ? config.PeakConcurrentUsers : config.InitialConcurrentUsers)
+                : config.InitialConcurrentUsers,
+
+            ArrivalPattern.Exponential => phase == "RampUp"
+                ? (int)(config.InitialConcurrentUsers + 
+                    (config.PeakConcurrentUsers - config.InitialConcurrentUsers) * Math.Pow(progress, 2))
+                : config.PeakConcurrentUsers,
+
+            ArrivalPattern.Random => _random.Next(
+                config.InitialConcurrentUsers,
+                phase == "Sustain" ? config.PeakConcurrentUsers + 1 : config.InitialConcurrentUsers + 1),
+
+            _ => config.InitialConcurrentUsers
+        };
+    }
+
+    public class SimulatedFailureException : Exception
+    {
+        public SimulatedFailureException(string message) : base(message) { }
     }
 }
