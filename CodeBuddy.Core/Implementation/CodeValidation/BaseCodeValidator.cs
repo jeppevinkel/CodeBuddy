@@ -90,6 +90,7 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     private readonly PerformanceMonitor _performanceMonitor = new();
     private readonly List<string> _temporaryFiles = new();
     private readonly ResourceUsageTracker _resourceTracker;
+    private readonly AdaptiveResourceManager _adaptiveResourceManager;
     private readonly ResourcePreallocationManager _resourceManager;
     private readonly ObjectPool<byte[]> _bufferPool;
     private readonly MemoryPressureMonitor _memoryMonitor;
@@ -117,7 +118,7 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     private const int MaxConcurrentOperations = 4;
     private static readonly TimeSpan ResourceMonitoringInterval = TimeSpan.FromSeconds(1);
 
-    protected BaseCodeValidator(ILogger logger)
+    protected BaseCodeValidator(ILogger logger, AdaptiveResourceManager adaptiveResourceManager = null)
     {
         _logger = logger;
         _resourceTracker = new ResourceUsageTracker();
@@ -126,6 +127,15 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
         _progress = new FileOperationProgress();
         _validationQueue = new BlockingCollection<ValidationTask>(MaxQueueSize);
         _queueProcessingCts = new CancellationTokenSource();
+        
+        // Initialize adaptive resource manager with all necessary components
+        _adaptiveResourceManager = adaptiveResourceManager ?? new AdaptiveResourceManager(
+            new TimeSeriesStorage(),
+            new ResourceTrendAnalyzer(),
+            new ResourceMonitoringDashboard(logger, new ResourceThresholds()),
+            new MemoryLeakPreventionSystem(),
+            new AdaptiveResourceConfig()
+        );
         
         // Initialize the monitoring dashboard with custom thresholds
         _monitoringDashboard = new ResourceMonitoringDashboard(logger, new ResourceThresholds
@@ -248,17 +258,39 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
         _totalStopwatch.Restart();
         _performanceMonitor.Start();
 
+        // Start collecting resource metrics
+        var resourcePattern = new ResourceUsagePattern
+        {
+            Timestamp = DateTime.UtcNow,
+            ValidationType = GetValidationType(options).ToString(),
+            MemoryUsage = Process.GetCurrentProcess().WorkingSet64,
+            ThreadCount = Process.GetCurrentProcess().Threads.Count,
+            CpuUsage = _performanceMonitor.GetMetrics().CpuPercent
+        };
+
         try
         {
             ThrowIfDisposed();
             
-            // Preallocate resources based on validation context
+            // Get optimal resource allocation from adaptive manager
+            var allocation = await _adaptiveResourceManager.GetOptimalResourceAllocation(resourcePattern.ValidationType);
+            
+            // Apply the adaptive resource settings
+            MaxQueueSize = allocation.QueueSize;
+            BatchSize = allocation.BatchSize;
+            
+            // Preallocate resources based on validation context and adaptive allocation
             var context = new ValidationContext
             {
                 CodeSize = code.Length,
                 ValidationType = GetValidationType(options),
                 IsHighPriority = options.IsHighPriority ?? false,
-                EstimatedComplexity = CalculateComplexity(code)
+                EstimatedComplexity = CalculateComplexity(code),
+                ResourceLimits = new ResourceLimits
+                {
+                    MaxMemory = allocation.MemoryLimit,
+                    MaxThreads = allocation.ThreadCount
+                }
             };
             
             using var allocation = await _resourceManager.PreallocateResourcesAsync(context);
@@ -552,6 +584,11 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
         finally
         {
             _cleanupLock.Release();
+            
+            // Update resource metrics at the end of validation
+            resourcePattern.ProcessingDuration = _totalStopwatch.Elapsed;
+            resourcePattern.MemoryUsage = Process.GetCurrentProcess().WorkingSet64;
+            await _adaptiveResourceManager.CollectResourceMetrics(resourcePattern.ValidationType, resourcePattern);
         }
     }
 
