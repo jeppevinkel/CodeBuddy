@@ -19,6 +19,10 @@ namespace CodeBuddy.Core.Implementation.Documentation
         private readonly IFileOperations _fileOps;
         private readonly DiagramGenerator _diagramGenerator;
         private readonly UsageExampleGenerator _exampleGenerator;
+        private readonly XmlDocumentationParser _xmlParser;
+        private readonly CodeExampleValidator _exampleValidator;
+        private readonly DocumentationAnalyzer _docAnalyzer;
+        private readonly CrossReferenceGenerator _crossRefGenerator;
 
         public DocumentationGenerator(
             IConfigurationManager configManager,
@@ -30,6 +34,10 @@ namespace CodeBuddy.Core.Implementation.Documentation
             _fileOps = fileOps;
             _diagramGenerator = new DiagramGenerator();
             _exampleGenerator = new UsageExampleGenerator(pluginManager, configManager, fileOps);
+            _xmlParser = new XmlDocumentationParser();
+            _exampleValidator = new CodeExampleValidator();
+            _docAnalyzer = new DocumentationAnalyzer();
+            _crossRefGenerator = new CrossReferenceGenerator();
         }
 
         /// <summary>
@@ -177,26 +185,255 @@ namespace CodeBuddy.Core.Implementation.Documentation
 
         private string GetTypeDescription(Type type)
         {
-            // Extract XML documentation comments
-            var xmlDoc = type.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>();
-            return xmlDoc?.Description ?? string.Empty;
+            var xmlDoc = _xmlParser.GetTypeDocumentation(type);
+            if (!string.IsNullOrEmpty(xmlDoc))
+                return xmlDoc;
+
+            var descAttr = type.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>();
+            return descAttr?.Description ?? string.Empty;
+        }
+
+        public async Task<List<CodeExample>> ExtractCodeExamplesAsync()
+        {
+            var examples = new List<CodeExample>();
+
+            // Extract examples from unit tests
+            var testAssemblies = AppDomain.CurrentDomain.GetAssemblies()
+                .Where(a => a.FullName.Contains(".Tests"));
+
+            foreach (var assembly in testAssemblies)
+            {
+                var testTypes = assembly.GetTypes()
+                    .Where(t => t.GetCustomAttributes<TestClassAttribute>().Any());
+
+                foreach (var type in testTypes)
+                {
+                    var testMethods = type.GetMethods()
+                        .Where(m => m.GetCustomAttributes<TestMethodAttribute>().Any());
+
+                    foreach (var method in testMethods)
+                    {
+                        var example = await _exampleGenerator.ExtractExampleFromTestMethod(method);
+                        if (example != null)
+                        {
+                            examples.Add(example);
+                        }
+                    }
+                }
+            }
+
+            // Extract examples from XML documentation
+            examples.AddRange(await _xmlParser.ExtractCodeExamplesFromXmlDocs());
+
+            // Validate examples
+            foreach (var example in examples)
+            {
+                await _exampleValidator.ValidateExample(example);
+            }
+
+            return examples;
+        }
+
+        public async Task<DocumentationValidationResult> ValidateDocumentationAsync()
+        {
+            var result = new DocumentationValidationResult();
+            
+            // Analyze XML documentation coverage
+            var coverageResult = await AnalyzeDocumentationCoverageAsync();
+            result.Coverage = coverageResult.Coverage;
+
+            // Validate code examples
+            var examples = await ExtractCodeExamplesAsync();
+            foreach (var example in examples)
+            {
+                var validation = await _exampleValidator.ValidateExample(example);
+                if (!validation.IsValid)
+                {
+                    result.Issues.AddRange(validation.Issues.Select(i => new DocumentationIssue
+                    {
+                        Component = example.Title,
+                        IssueType = "InvalidExample",
+                        Description = i,
+                        Severity = IssueSeverity.Error
+                    }));
+                }
+            }
+
+            // Validate cross-references
+            var crossRefs = await GenerateCrossReferencesAsync();
+            foreach (var issue in crossRefs.Issues)
+            {
+                result.Issues.Add(new DocumentationIssue
+                {
+                    Component = issue.Component,
+                    IssueType = "InvalidCrossReference",
+                    Description = issue.Description,
+                    Severity = IssueSeverity.Warning
+                });
+            }
+
+            // Add recommendations
+            result.Recommendations.AddRange(_docAnalyzer.GenerateRecommendations(result.Issues));
+
+            result.IsValid = !result.Issues.Any(i => i.Severity == IssueSeverity.Error);
+            return result;
+        }
+
+        public async Task<CrossReferenceResult> GenerateCrossReferencesAsync()
+        {
+            return await _crossRefGenerator.GenerateCrossReferences(AppDomain.CurrentDomain.GetAssemblies()
+                .Where(a => a.FullName.StartsWith("CodeBuddy")));
+        }
+
+        public async Task<DocumentationCoverageResult> AnalyzeDocumentationCoverageAsync()
+        {
+            return await _docAnalyzer.AnalyzeCoverage(AppDomain.CurrentDomain.GetAssemblies()
+                .Where(a => a.FullName.StartsWith("CodeBuddy")));
+        }
+
+        public async Task<ResourcePatternDocumentation> GenerateResourcePatternsAsync()
+        {
+            var result = new ResourcePatternDocumentation();
+
+            // Generate common resource management patterns
+            result.Patterns.AddRange(await GenerateResourcePatterns());
+
+            // Extract real usage examples
+            result.Examples.AddRange(await ExtractResourceUsageExamples());
+
+            // Compile best practices
+            result.BestPractices.AddRange(GenerateResourceBestPractices());
+
+            return result;
+        }
+
+        private async Task<List<ResourcePattern>> GenerateResourcePatterns()
+        {
+            var patterns = new List<ResourcePattern>();
+            var resourceClasses = AppDomain.CurrentDomain.GetAssemblies()
+                .Where(a => a.FullName.StartsWith("CodeBuddy"))
+                .SelectMany(a => a.GetTypes())
+                .Where(t => t.Name.Contains("Resource") || t.GetInterfaces().Any(i => i.Name.Contains("Resource")));
+
+            foreach (var resourceClass in resourceClasses)
+            {
+                var pattern = new ResourcePattern
+                {
+                    Name = resourceClass.Name,
+                    Description = GetTypeDescription(resourceClass),
+                    UseCase = _xmlParser.GetResourceUseCase(resourceClass),
+                    Benefits = _xmlParser.GetResourceBenefits(resourceClass),
+                    Considerations = _xmlParser.GetResourceConsiderations(resourceClass),
+                    Examples = await _exampleGenerator.GenerateResourceExamples(resourceClass)
+                };
+                
+                patterns.Add(pattern);
+            }
+
+            return patterns;
+        }
+
+        private async Task<List<ResourceUsageExample>> ExtractResourceUsageExamples()
+        {
+            return await _exampleGenerator.ExtractResourceUsageExamples();
+        }
+
+        private List<ResourceBestPractice> GenerateResourceBestPractices()
+        {
+            return _docAnalyzer.GenerateResourceBestPractices();
         }
 
         private List<MethodDocumentation> GetMethodDocumentation(Type type)
         {
-            return type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static)
-                .Select(m => new MethodDocumentation
+            var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static)
+                .Where(m => !m.IsSpecialName); // Filter out property accessors
+
+            return methods.Select(m =>
+            {
+                var doc = new MethodDocumentation
                 {
                     Name = m.Name,
-                    ReturnType = m.ReturnType.Name,
-                    Parameters = m.GetParameters().Select(p => new ParameterDocumentation
+                    ReturnType = GetFullTypeName(m.ReturnType),
+                    Description = GetMethodDescription(m),
+                    Parameters = GetParameterDocumentation(m)
+                };
+
+                // Add XML documentation details
+                var xmlDoc = _xmlParser.GetMethodDocumentation(m);
+                if (xmlDoc != null)
+                {
+                    doc.Description = xmlDoc.Summary;
+                    doc.Parameters.ForEach(p =>
                     {
-                        Name = p.Name,
-                        Type = p.ParameterType.Name,
-                        Description = GetParameterDescription(m, p)
-                    }).ToList(),
-                    Description = GetMethodDescription(m)
-                }).ToList();
+                        var paramDoc = xmlDoc.Parameters.FirstOrDefault(xp => xp.Name == p.Name);
+                        if (paramDoc != null)
+                        {
+                            p.Description = paramDoc.Description;
+                        }
+                    });
+                }
+
+                // Add cross-references
+                doc.References = _crossRefGenerator.FindMethodReferences(m)
+                    .Select(r => new MethodReference
+                    {
+                        ReferencedMethod = r.TargetMethod,
+                        ReferenceType = r.Type,
+                        Description = r.Description
+                    }).ToList();
+
+                // Add usage examples
+                doc.Examples = _exampleGenerator.FindMethodExamples(m);
+
+                // Add test coverage info
+                doc.TestMethods = FindRelatedTestMethods(m)
+                    .Select(t => new TestMethodReference
+                    {
+                        TestClass = t.DeclaringType.Name,
+                        TestMethod = t.Name,
+                        TestDescription = GetMethodDescription(t)
+                    }).ToList();
+
+                return doc;
+            }).ToList();
+        }
+
+        private string GetFullTypeName(Type type)
+        {
+            if (type.IsGenericType)
+            {
+                var genericArgs = type.GetGenericArguments()
+                    .Select(GetFullTypeName);
+                return $"{type.Name.Split('`')[0]}<{string.Join(", ", genericArgs)}>";
+            }
+            return type.Name;
+        }
+
+        private List<ParameterDocumentation> GetParameterDocumentation(MethodInfo method)
+        {
+            return method.GetParameters().Select(p => new ParameterDocumentation
+            {
+                Name = p.Name,
+                Type = GetFullTypeName(p.ParameterType),
+                Description = GetParameterDescription(method, p),
+                IsOptional = p.IsOptional,
+                DefaultValue = p.IsOptional ? p.DefaultValue?.ToString() : null,
+                Attributes = p.GetCustomAttributes()
+                    .Select(a => a.GetType().Name.Replace("Attribute", ""))
+                    .ToList()
+            }).ToList();
+        }
+
+        private IEnumerable<MethodInfo> FindRelatedTestMethods(MethodInfo method)
+        {
+            var testAssemblies = AppDomain.CurrentDomain.GetAssemblies()
+                .Where(a => a.FullName.Contains(".Tests"));
+
+            return testAssemblies.SelectMany(a => a.GetTypes())
+                .Where(t => t.GetCustomAttributes<TestClassAttribute>().Any())
+                .SelectMany(t => t.GetMethods())
+                .Where(m => m.GetCustomAttributes<TestMethodAttribute>().Any()
+                    && m.Name.Contains(method.Name));
         }
 
         private List<PropertyDocumentation> GetPropertyDocumentation(Type type)
