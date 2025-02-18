@@ -20,6 +20,17 @@ namespace CodeBuddy.Core.Models.Analytics
         public List<KeyValuePair<string, int>> TopAccessedKeys { get; set; }
         public int PartitionCount { get; set; }
         public Dictionary<string, double> PartitionHitRatios { get; set; }
+        
+        // Advanced eviction strategy metrics
+        public string ActiveEvictionStrategy { get; set; }
+        public Dictionary<string, double> EvictionStrategyMetrics { get; set; }
+        public double AdaptiveCachingEffectiveness { get; set; }
+        public int PredictivePreloadCount { get; set; }
+        public double PreloadHitRatio { get; set; }
+        public double MemoryPressurePercentage { get; set; }
+        public Dictionary<string, int> EvictionsByCategory { get; set; }
+        public Dictionary<string, double> CategoryHitRatios { get; set; }
+        public double WeightedEvictionScore { get; set; }
 
         public CachePerformanceMetrics()
         {
@@ -27,6 +38,9 @@ namespace CodeBuddy.Core.Models.Analytics
             AccessPatternFrequency = new Dictionary<string, int>();
             TopAccessedKeys = new List<KeyValuePair<string, int>>();
             PartitionHitRatios = new Dictionary<string, double>();
+            EvictionStrategyMetrics = new Dictionary<string, double>();
+            EvictionsByCategory = new Dictionary<string, int>();
+            CategoryHitRatios = new Dictionary<string, double>();
         }
     }
 }
