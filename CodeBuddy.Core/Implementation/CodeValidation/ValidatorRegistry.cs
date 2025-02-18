@@ -74,8 +74,60 @@ namespace CodeBuddy.Core.Implementation.CodeValidation
             metadata = metadata ?? new ValidatorMetadata();
             _dependencyResolver.ValidateDependencies(languageId, metadata.Dependencies);
 
+            // Initialize the validator before registration
+            try
+            {
+                validator.Initialize();
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException($"Failed to initialize validator for {languageId}", ex);
+            }
+
             var entry = new ValidatorEntry(validator, metadata);
-            
+
+            // If hot-reload is supported and validator exists, handle the update
+            if (_validators.TryGetValue(languageId, out var existingEntry))
+            {
+                if (!metadata.SupportsHotReload)
+                {
+                    throw new InvalidOperationException($"Validator for {languageId} does not support hot-reloading");
+                }
+
+                // Dispose the old validator
+                (existingEntry.Validator as IDisposable)?.Dispose();
+
+                // Initialize the new validator
+                try
+                {
+                    validator.Initialize();
+                }
+                catch
+                {
+                    // If initialization fails, try to restore the old validator
+                    try
+                    {
+                        existingEntry.Validator.Initialize();
+                        _validators.TryUpdate(languageId, existingEntry, entry);
+                    }
+                    catch
+                    {
+                        // If restoration fails, remove the validator entirely
+                        _validators.TryRemove(languageId, out _);
+                    }
+                    throw;
+                }
+
+                // Update the validator if initialization succeeded
+                if (_validators.TryUpdate(languageId, entry, existingEntry))
+                {
+                    OnValidatorRegistered(new ValidatorRegistrationEventArgs(languageId, validator, metadata));
+                    return true;
+                }
+                return false;
+            }
+
+            // For new validators, just add them
             if (_validators.TryAdd(languageId, entry))
             {
                 OnValidatorRegistered(new ValidatorRegistrationEventArgs(languageId, validator, entry.Metadata));
@@ -89,7 +141,26 @@ namespace CodeBuddy.Core.Implementation.CodeValidation
         {
             if (string.IsNullOrEmpty(languageId)) throw new ArgumentNullException(nameof(languageId));
 
+            // Check for dependent validators before unregistering
+            var dependentValidators = _dependencyResolver.GetDependentValidators(languageId).ToList();
+            if (dependentValidators.Any())
+            {
+                throw new InvalidOperationException(
+                    $"Cannot unregister validator {languageId} because it is required by: {string.Join(", ", dependentValidators)}");
+            }
+
             if (_validators.TryRemove(languageId, out var entry))
+            {
+                // Properly dispose the validator
+                try
+                {
+                    (entry.Validator as IDisposable)?.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    // Log disposal error but continue with unregistration
+                    System.Diagnostics.Debug.WriteLine($"Error disposing validator {languageId}: {ex.Message}");
+                }
             {
                 OnValidatorUnregistered(new ValidatorRegistrationEventArgs(languageId, entry.Validator, entry.Metadata));
                 return true;
@@ -184,15 +255,35 @@ namespace CodeBuddy.Core.Implementation.CodeValidation
             _eventLock.Dispose();
         }
 
-        private class ValidatorEntry
+        private class ValidatorEntry : IDisposable
         {
             public ICodeValidator Validator { get; }
             public ValidatorMetadata Metadata { get; }
+            private bool _disposed;
 
             public ValidatorEntry(ICodeValidator validator, ValidatorMetadata metadata)
             {
                 Validator = validator;
                 Metadata = metadata;
+            }
+
+            public void Dispose()
+            {
+                if (_disposed) return;
+                
+                if (Validator is IDisposable disposable)
+                {
+                    try
+                    {
+                        disposable.Dispose();
+                    }
+                    catch
+                    {
+                        // Log disposal error
+                    }
+                }
+                
+                _disposed = true;
             }
         }
     }
