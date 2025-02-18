@@ -134,6 +134,41 @@ public class ValidationPipeline
                     });
                 }
             }
+
+            // Perform security scanning if enabled
+            if (context.Options?.EnableSecurityScanning == true)
+            {
+                try
+                {
+                    var securityScanner = GetSecurityScanner(context.Language);
+                    pipelineResult.SecurityScanResult = await securityScanner.ScanAsync(context.Code);
+
+                    // Add security violations as validation issues
+                    foreach (var violation in pipelineResult.SecurityScanResult.Issues)
+                    {
+                        pipelineResult.Issues.Add(new ValidationIssue
+                        {
+                            RuleId = violation.RuleId,
+                            Severity = MapSecuritySeverity(violation.Severity),
+                            Message = violation.Message,
+                            Location = violation.Location,
+                            RelatedNodes = violation.RelatedNode != null ? new List<UnifiedASTNode> { violation.RelatedNode } : new List<UnifiedASTNode>()
+                        });
+                    }
+
+                    // Update metrics
+                    _metricsAggregator.RecordSecurityMetrics(pipelineResult.SecurityScanResult);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to perform security scanning");
+                    pipelineResult.Issues.Add(new ValidationIssue
+                    {
+                        Severity = ValidationSeverity.Warning,
+                        Message = "Failed to perform security scanning: " + ex.Message
+                    });
+                }
+            }
             
             // Merge pipeline result with our tracking
             result.IsValid = pipelineResult.IsValid;
@@ -171,6 +206,32 @@ public class ValidationPipeline
             });
             return result;
         }
+    }
+
+    private Security.SecurityScannerBase GetSecurityScanner(string language)
+    {
+        var astConverter = _astValidatorRegistry.GetConverter(language);
+        var config = _configurationManager.GetSecurityConfiguration();
+
+        return language.ToLowerInvariant() switch
+        {
+            "c#" => new Security.CSharpSecurityScanner(astConverter, config),
+            "javascript" => new Security.JavaScriptSecurityScanner(astConverter, config),
+            "python" => new Security.PythonSecurityScanner(astConverter, config),
+            _ => throw new NotSupportedException($"Security scanning not supported for language: {language}")
+        };
+    }
+
+    private ValidationSeverity MapSecuritySeverity(Security.SecuritySeverity severity)
+    {
+        return severity switch
+        {
+            Security.SecuritySeverity.Critical => ValidationSeverity.Error,
+            Security.SecuritySeverity.High => ValidationSeverity.Error,
+            Security.SecuritySeverity.Medium => ValidationSeverity.Warning,
+            Security.SecuritySeverity.Low => ValidationSeverity.Warning,
+            _ => ValidationSeverity.Warning
+        };
     }
 
     private ValidationDelegate BuildPipeline(ValidationContext context)

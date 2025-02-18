@@ -39,6 +39,7 @@ namespace CodeBuddy.Core.Models
         public List<ASTPatternMatch> PatternMatches { get; set; }
         public TimeSpan ValidationTime { get; set; }
         public ValidationErrorCollection Errors { get; set; }
+        public Security.SecurityScanResult SecurityScanResult { get; set; }
 
         public ValidationResult()
         {
@@ -46,6 +47,7 @@ namespace CodeBuddy.Core.Models
             PatternMatches = new List<ASTPatternMatch>();
             Errors = new ValidationErrorCollection();
             Status = ValidationStatus.Success;
+            SecurityScanResult = new Security.SecurityScanResult();
         }
 
         public bool HasErrors => 
