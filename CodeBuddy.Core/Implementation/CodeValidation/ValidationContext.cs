@@ -7,12 +7,14 @@ namespace CodeBuddy.Core.Implementation.CodeValidation
 {
     public class ValidationContext
     {
+        public string Id { get; } = Guid.NewGuid().ToString();
         public ICodeValidator Validator { get; set; }
         public string Code { get; set; }
         public string Language { get; set; }
         public ValidationOptions Options { get; set; }
         public MetricsCollection Metrics { get; } = new MetricsCollection();
         public ValidationResult Result { get; set; } = new ValidationResult();
+        public bool IsCriticalValidation { get; set; }
     }
 
     public class MetricsCollection

@@ -4,6 +4,19 @@ namespace CodeBuddy.Core.Models;
 
 public class ValidationResilienceConfig
 {
+    // Resource Throttling Configuration
+    public double MaxCpuThresholdPercent { get; set; } = 80.0;
+    public double MaxMemoryThresholdMB { get; set; } = 1024.0; // 1GB
+    public double MaxDiskIoMBPS { get; set; } = 100.0; // 100 MB/s
+    public int MaxConcurrentValidations { get; set; } = 10;
+    
+    // Adaptive Throttling Configuration
+    public TimeSpan ResourceTrendInterval { get; set; } = TimeSpan.FromMinutes(5);
+    public bool EnableAdaptiveThrottling { get; set; } = true;
+    public double ThrottlingAdjustmentFactor { get; set; } = 0.1; // 10% adjustment
+    public int ResourceReservationPercent { get; set; } = 20; // Reserve 20% for critical validations
+    
+    // Existing Resilience Configuration
     public int MaxRetryAttempts { get; set; } = 3;
     public int CircuitBreakerThreshold { get; set; } = 5;
     public TimeSpan CircuitBreakerResetTime { get; set; } = TimeSpan.FromMinutes(5);
