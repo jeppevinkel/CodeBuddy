@@ -92,6 +92,7 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     private readonly ResourceUsageTracker _resourceTracker;
     private readonly AsyncResourceTracker _asyncTracker;
     private readonly ObjectPool<byte[]> _bufferPool;
+    private readonly AsyncOperationMetrics _operationMetrics;
     private readonly ConcurrentQueue<IDisposable> _disposables = new();
     private readonly SemaphoreSlim _cleanupLock = new(1, 1);
     private readonly BlockingCollection<ValidationTask> _validationQueue;
@@ -113,7 +114,9 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     {
         _logger = logger;
         _resourceTracker = new ResourceUsageTracker();
-        _asyncTracker = new AsyncResourceTracker(logger);
+        _performanceMonitor = new PerformanceMonitor();
+        _operationMetrics = new AsyncOperationMetrics(logger);
+        _asyncTracker = new AsyncResourceTracker(logger, _resourceTracker, _performanceMonitor);
         _bufferPool = ObjectPool.Create<byte[]>();
         _progress = new FileOperationProgress();
         _validationQueue = new BlockingCollection<ValidationTask>(MaxQueueSize);
@@ -783,6 +786,10 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     {
         _totalStopwatch.Stop();
         var metrics = result.Statistics.Performance;
+        
+        // Add async operation metrics
+        metrics.ResourceUtilization["AsyncOperations"] = _asyncTracker.CurrentOperationCount;
+        metrics.ResourceUtilization.Add("AsyncMetrics", _asyncTracker.Metrics);
 
         // Phase timings
         foreach (var (phase, stopwatch) in _phaseStopwatches)
