@@ -1,104 +1,126 @@
 using System;
 using System.Collections.Generic;
-using CodeBuddy.Core.Models.TestCoverage;
+using CodeBuddy.Core.Models.AST;
 
-namespace CodeBuddy.Core.Models;
-
-public class ValidationResult
+namespace CodeBuddy.Core.Models
 {
-    public bool IsValid { get; set; }
-    public List<ValidationIssue> Issues { get; set; } = new();
-    public string Language { get; set; }
-    public ValidationStatistics Statistics { get; set; } = new();
-    
-    // Error recovery and resilience information
-    public ValidationState State { get; set; } = ValidationState.NotStarted;
-    public bool IsPartialSuccess { get; set; }
-    public List<MiddlewareFailure> FailedMiddleware { get; set; } = new();
-    public List<string> SkippedMiddleware { get; set; } = new();
-    public RecoveryMetrics RecoveryStats { get; set; } = new();
-    
-    // Test Coverage Data
-    public TestCoverageReport CoverageReport { get; set; }
-    public Dictionary<string, LineCoverage> LineCoverageData { get; set; } = new();
-    public List<string> IgnoredCoverageRegions { get; set; } = new();
-    public List<CoverageTrendPoint> HistoricalCoverage { get; set; } = new();
-    public CoverageValidationResult CoverageValidation { get; set; } = new();
-}
+    /// <summary>
+    /// Represents the result of a code validation operation
+    /// </summary>
+    public class ValidationResult
+    {
+        /// <summary>
+        /// The unified AST representation of the validated code
+        /// </summary>
+        public UnifiedASTNode AST { get; set; }
 
-public class CoverageValidationResult
-{
-    public bool MeetsThreshold { get; set; }
-    public double ThresholdPercentage { get; set; }
-    public Dictionary<string, double> ModuleThresholds { get; set; } = new();
-    public List<string> ModulesBelowThreshold { get; set; } = new();
-    public List<CoverageRecommendation> ImprovementSuggestions { get; set; } = new();
-}
+        /// <summary>
+        /// Results from cross-language pattern matching analysis
+        /// </summary>
+        public List<ASTPatternMatch> PatternMatches { get; set; }
 
-public enum ValidationState
-{
-    NotStarted,
-    InProgress,
-    Completed,
-    CompletedWithErrors,
-    Failed,
-    Recovered
-}
+        /// <summary>
+        /// List of validation issues found
+        /// </summary>
+        public List<ValidationIssue> Issues { get; set; }
 
-public class MiddlewareFailure
-{
-    public string MiddlewareName { get; set; }
-    public string ErrorMessage { get; set; }
-    public string StackTrace { get; set; }
-    public int FailureCount { get; set; }
-    public int RetryAttempts { get; set; }
-    public bool CircuitBreakerTripped { get; set; }
-    public Dictionary<string, string> Context { get; set; } = new();
-}
+        /// <summary>
+        /// Overall validation status
+        /// </summary>
+        public ValidationStatus Status { get; set; }
 
-public class RecoveryMetrics
-{
-    public int TotalRecoveryAttempts { get; set; }
-    public int SuccessfulRecoveries { get; set; }
-    public double AverageRecoveryTimeMs { get; set; }
-    public List<FailurePattern> DetectedPatterns { get; set; } = new();
-    public double PerformanceImpactMs { get; set; }
-}
+        /// <summary>
+        /// The language of the validated code
+        /// </summary>
+        public string Language { get; set; }
 
-public class FailurePattern
-{
-    public string Pattern { get; set; }
-    public int Occurrences { get; set; }
-    public DateTime FirstOccurrence { get; set; }
-    public DateTime LastOccurrence { get; set; }
-}
+        /// <summary>
+        /// Time taken to perform the validation
+        /// </summary>
+        public TimeSpan ValidationTime { get; set; }
 
-public class ValidationIssue
-{
-    public string Code { get; set; }
-    public string Message { get; set; }
-    public ValidationSeverity Severity { get; set; }
-    public string Location { get; set; }
-    public string Suggestion { get; set; }
-}
+        public ValidationResult()
+        {
+            Issues = new List<ValidationIssue>();
+            PatternMatches = new List<ASTPatternMatch>();
+            Status = ValidationStatus.Success;
+        }
+    }
 
-public enum ValidationSeverity
-{
-    Info,
-    Warning,
-    Error,
-    SecurityVulnerability
-}
+    public class ASTPatternMatch
+    {
+        /// <summary>
+        /// The pattern that was matched
+        /// </summary>
+        public string PatternName { get; set; }
 
-public class ValidationStatistics
-{
-    public int TotalIssues { get; set; }
-    public int SecurityIssues { get; set; }
-    public int StyleIssues { get; set; }
-    public int BestPracticeIssues { get; set; }
-    public double CodeCoveragePercentage { get; set; }
-    public int CyclomaticComplexity { get; set; }
-    
-    // Performance metrics
-    public PerformanceMetrics Performance { get; set; } = new();
+        /// <summary>
+        /// The nodes that matched the pattern
+        /// </summary>
+        public List<UnifiedASTNode> MatchedNodes { get; set; }
+
+        /// <summary>
+        /// Location where the pattern was found
+        /// </summary>
+        public SourceLocation Location { get; set; }
+
+        /// <summary>
+        /// Additional context about the match
+        /// </summary>
+        public Dictionary<string, object> Context { get; set; }
+
+        public ASTPatternMatch()
+        {
+            MatchedNodes = new List<UnifiedASTNode>();
+            Context = new Dictionary<string, object>();
+        }
+    }
+
+    public class ValidationIssue
+    {
+        /// <summary>
+        /// The severity of the issue
+        /// </summary>
+        public IssueSeverity Severity { get; set; }
+
+        /// <summary>
+        /// Description of the issue
+        /// </summary>
+        public string Message { get; set; }
+
+        /// <summary>
+        /// Location in the source code where the issue was found
+        /// </summary>
+        public SourceLocation Location { get; set; }
+
+        /// <summary>
+        /// The rule that generated this issue
+        /// </summary>
+        public string RuleId { get; set; }
+
+        /// <summary>
+        /// Related AST nodes
+        /// </summary>
+        public List<UnifiedASTNode> RelatedNodes { get; set; }
+
+        public ValidationIssue()
+        {
+            RelatedNodes = new List<UnifiedASTNode>();
+        }
+    }
+
+    public enum ValidationStatus
+    {
+        Success,
+        Warning,
+        Error
+    }
+
+    public enum IssueSeverity
+    {
+        Info,
+        Warning,
+        Error,
+        Critical
+    }
 }
