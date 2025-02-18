@@ -1,56 +1,133 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
 
 namespace CodeBuddy.Core.Models.Configuration
 {
     /// <summary>
     /// Base class for all configuration sections
     /// </summary>
-    public abstract class BaseConfiguration
+    public abstract class BaseConfiguration : IValidatableObject
     {
         /// <summary>
-        /// Gets or sets whether this configuration section is enabled
+        /// Configuration section identifier
         /// </summary>
-        [ConfigurationItem("Controls whether this configuration section is enabled", required: true, defaultValue: "true")]
-        public bool Enabled { get; set; } = true;
+        public string SectionId { get; set; }
 
         /// <summary>
-        /// Gets or sets custom configuration metadata
+        /// Last modified timestamp
         /// </summary>
-        [ConfigurationItem("Custom metadata for this configuration section", required: false)]
+        public DateTime LastModified { get; set; }
+
+        /// <summary>
+        /// Configuration schema version
+        /// </summary>
+        public Version SchemaVersion { get; set; }
+
+        /// <summary>
+        /// Environment this configuration is for
+        /// </summary>
+        public string Environment { get; set; }
+
+        /// <summary>
+        /// Metadata about this configuration section
+        /// </summary>
         public Dictionary<string, string> Metadata { get; set; } = new();
 
         /// <summary>
-        /// Gets or sets when this configuration was last modified
+        /// Validates the configuration
         /// </summary>
-        [ConfigurationItem("When this configuration was last modified", required: false)]
-        public DateTime LastModified { get; set; } = DateTime.UtcNow;
-
-        /// <summary>
-        /// Gets or sets who last modified this configuration
-        /// </summary>
-        [ConfigurationItem("Who last modified this configuration", required: false)]
-        public string LastModifiedBy { get; set; } = string.Empty;
-
-        /// <summary>
-        /// Validates the configuration and returns any validation errors
-        /// </summary>
-        public virtual IEnumerable<string> Validate()
+        public virtual IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
         {
-            var errors = new List<string>();
+            var results = new List<ValidationResult>();
 
-            // Base validation logic
-            if (!Enabled && Metadata.Count > 0)
+            // Basic validation
+            if (string.IsNullOrEmpty(SectionId))
             {
-                errors.Add("Metadata should not be set when configuration is disabled");
+                results.Add(new ValidationResult("SectionId is required", new[] { nameof(SectionId) }));
             }
 
-            if (LastModified > DateTime.UtcNow)
+            if (SchemaVersion == null)
             {
-                errors.Add("LastModified cannot be in the future");
+                results.Add(new ValidationResult("SchemaVersion is required", new[] { nameof(SchemaVersion) }));
             }
 
-            return errors;
+            return results;
+        }
+    }
+
+    /// <summary>
+    /// Base class for feature-specific configuration sections
+    /// </summary>
+    public abstract class FeatureConfiguration : BaseConfiguration
+    {
+        /// <summary>
+        /// Whether the feature is enabled
+        /// </summary>
+        public bool Enabled { get; set; }
+
+        /// <summary>
+        /// Feature-specific settings
+        /// </summary>
+        public Dictionary<string, object> Settings { get; set; } = new();
+
+        /// <summary>
+        /// Dependencies on other features
+        /// </summary>
+        public List<string> Dependencies { get; set; } = new();
+
+        public override IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
+        {
+            foreach (var result in base.Validate(validationContext))
+            {
+                yield return result;
+            }
+
+            // Validate dependencies
+            if (Enabled && Dependencies.Count > 0)
+            {
+                // Dependency validation would be implemented here
+                // This would check if all required features are enabled
+            }
+        }
+    }
+
+    /// <summary>
+    /// Base class for plugin configuration sections
+    /// </summary>
+    public abstract class PluginConfiguration : BaseConfiguration
+    {
+        /// <summary>
+        /// Plugin identifier
+        /// </summary>
+        public string PluginId { get; set; }
+
+        /// <summary>
+        /// Plugin version
+        /// </summary>
+        public Version PluginVersion { get; set; }
+
+        /// <summary>
+        /// Plugin-specific settings
+        /// </summary>
+        public Dictionary<string, object> Settings { get; set; } = new();
+
+        public override IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
+        {
+            foreach (var result in base.Validate(validationContext))
+            {
+                yield return result;
+            }
+
+            if (string.IsNullOrEmpty(PluginId))
+            {
+                yield return new ValidationResult("PluginId is required", new[] { nameof(PluginId) });
+            }
+
+            if (PluginVersion == null)
+            {
+                yield return new ValidationResult("PluginVersion is required", new[] { nameof(PluginVersion) });
+            }
         }
     }
 }
