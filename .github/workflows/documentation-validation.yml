@@ -1,0 +1,65 @@
+name: Documentation Validation
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+jobs:
+  validate-documentation:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v1
+      with:
+        dotnet-version: 6.0.x
+        
+    - name: Restore dependencies
+      run: dotnet restore
+      
+    - name: Build
+      run: dotnet build --no-restore
+      
+    - name: Validate Documentation
+      run: dotnet run --project CodeBuddy.CLI/CodeBuddy.CLI.csproj -- validate-docs
+      
+    - name: Generate Documentation Report
+      run: dotnet run --project CodeBuddy.CLI/CodeBuddy.CLI.csproj -- generate-docs-report
+      
+    - name: Update Documentation Badges
+      run: dotnet run --project CodeBuddy.CLI/CodeBuddy.CLI.csproj -- update-docs-badges
+      
+    - name: Archive Documentation Report
+      uses: actions/upload-artifact@v2
+      with:
+        name: documentation-report
+        path: |
+          docs/reports/documentation-coverage.md
+          docs/reports/documentation-issues.md
+          docs/badges/*.svg
+        
+    - name: Check Documentation Coverage Thresholds
+      run: dotnet run --project CodeBuddy.CLI/CodeBuddy.CLI.csproj -- check-docs-coverage
+      
+    - name: Comment PR with Documentation Report
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v5
+      with:
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('docs/reports/documentation-coverage.md', 'utf8');
+          const issues = fs.readFileSync('docs/reports/documentation-issues.md', 'utf8');
+          
+          const body = `## Documentation Coverage Report\n\n${report}\n\n## Documentation Issues\n\n${issues}`;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: body
+          })
