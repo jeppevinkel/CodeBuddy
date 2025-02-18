@@ -93,20 +93,12 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     private readonly ObjectPool<byte[]> _bufferPool;
     private readonly ConcurrentQueue<IDisposable> _disposables = new();
     private readonly SemaphoreSlim _cleanupLock = new(1, 1);
-    private readonly BlockingCollection<ValidationTask> _validationQueue;
-    private readonly CancellationTokenSource _queueProcessingCts;
-    private readonly Task _queueProcessingTask;
     private bool _disposed;
     private FileOperationProgress _progress;
     
     // Resource management thresholds
-    private const long MemoryThresholdBytes = 500 * 1024 * 1024; // 500MB
-    private const long CriticalMemoryThresholdBytes = 800 * 1024 * 1024; // 800MB
-    private const int MaxTemporaryFiles = 100;
     private const int BatchSize = 1024 * 1024; // 1MB batch size for large files
-    private const int MaxQueueSize = 1000;
-    private const int MaxConcurrentOperations = 4;
-    private static readonly TimeSpan ResourceMonitoringInterval = TimeSpan.FromSeconds(1);
+    private const int MaxTemporaryFiles = 100;
 
     protected BaseCodeValidator(ILogger logger)
     {
@@ -114,106 +106,17 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
         _resourceTracker = new ResourceUsageTracker();
         _bufferPool = ObjectPool.Create<byte[]>();
         _progress = new FileOperationProgress();
-        _validationQueue = new BlockingCollection<ValidationTask>(MaxQueueSize);
-        _queueProcessingCts = new CancellationTokenSource();
-        
-        // Start queue processing
-        _queueProcessingTask = ProcessValidationQueueAsync(_queueProcessingCts.Token);
         
         // Register memory pressure listener
         GC.AddMemoryPressureListener(OnMemoryPressure);
-        
-        // Start resource monitoring
-        StartResourceMonitoring();
     }
 
-    private class ValidationTask
-    {
-        public string Code { get; set; }
-        public ValidationOptions Options { get; set; }
-        public TaskCompletionSource<ValidationResult> CompletionSource { get; set; }
-        public CancellationToken CancellationToken { get; set; }
-    }
 
-    private async Task ProcessValidationQueueAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            using var semaphore = new SemaphoreSlim(MaxConcurrentOperations);
-            
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                if (_validationQueue.TryTake(out var task, Timeout.Infinite, cancellationToken))
-                {
-                    await semaphore.WaitAsync(cancellationToken);
-                    
-                    _ = ProcessValidationTaskAsync(task, semaphore)
-                        .ContinueWith(t =>
-                        {
-                            if (t.IsFaulted)
-                                task.CompletionSource.TrySetException(t.Exception.InnerExceptions);
-                        }, TaskContinuationOptions.OnlyOnFaulted);
-                }
-            }
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            // Normal cancellation, ignore
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error in validation queue processing");
-        }
-    }
 
-    private async Task ProcessValidationTaskAsync(ValidationTask task, SemaphoreSlim semaphore)
-    {
-        try
-        {
-            var result = await ValidateInternalAsync(task.Code, task.Options, task.CancellationToken);
-            task.CompletionSource.TrySetResult(result);
-        }
-        catch (Exception ex)
-        {
-            task.CompletionSource.TrySetException(ex);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-
-    private void StartResourceMonitoring()
-    {
-        Task.Run(async () =>
-        {
-            while (!_disposed)
-            {
-                await MonitorResourcesAsync(CancellationToken.None);
-                await Task.Delay(ResourceMonitoringInterval);
-            }
-        });
-    }
-
-    public async Task<ValidationResult> ValidateAsync(string code, string language, ValidationOptions options, CancellationToken cancellationToken = default)
+    public async Task<ValidationResult> ValidateAsync(string code, ValidationOptions options, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        
-        var validationTask = new ValidationTask
-        {
-            Code = code,
-            Options = options,
-            CompletionSource = new TaskCompletionSource<ValidationResult>(),
-            CancellationToken = cancellationToken
-        };
-
-        // Add to processing queue
-        if (!_validationQueue.TryAdd(validationTask))
-        {
-            throw new InvalidOperationException("Validation queue is full. Please try again later.");
-        }
-
-        return await validationTask.CompletionSource.Task;
+        return await ValidateInternalAsync(code, options, cancellationToken);
     }
 
     private async Task<ValidationResult> ValidateInternalAsync(string code, ValidationOptions options, CancellationToken cancellationToken)
@@ -506,17 +409,6 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     {
         try
         {
-            // Stop queue processing
-            _queueProcessingCts.Cancel();
-            await Task.WhenAny(_queueProcessingTask, Task.Delay(5000)); // Wait up to 5 seconds
-            
-            // Stop accepting new items and clear queue
-            _validationQueue.CompleteAdding();
-            while (_validationQueue.TryTake(out var task))
-            {
-                task.CompletionSource.TrySetCanceled();
-            }
-            
             await _cleanupLock.WaitAsync().ConfigureAwait(false);
             
             // Dispose all tracked disposables
@@ -540,10 +432,6 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
             
             // Release memory pressure listener
             GC.RemoveMemoryPressureListener(OnMemoryPressure);
-            
-            // Dispose queues and other resources
-            _validationQueue.Dispose();
-            _queueProcessingCts.Dispose();
             
             // Wait for any ongoing operations to complete
             await Task.Delay(100).ConfigureAwait(false);
