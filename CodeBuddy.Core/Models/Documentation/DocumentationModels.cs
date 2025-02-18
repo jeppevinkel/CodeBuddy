@@ -8,7 +8,162 @@ namespace CodeBuddy.Core.Models.Documentation
     /// </summary>
     public class DocumentationValidationResult
     {
-        public bool IsValid { get; set; }
+        public bool IsValid { get; set;     /// <summary>
+    /// Defines the documentation standards and requirements for different documentation types
+    /// </summary>
+    public class DocumentationStandard
+    {
+        public string Version { get; set; }
+        public DateTime LastUpdated { get; set; }
+        public List<DocumentationType> SupportedTypes { get; set; } = new List<DocumentationType>();
+        public Dictionary<string, DocumentationRequirement> Requirements { get; set; } = new Dictionary<string, DocumentationRequirement>();
+        public StyleGuide StyleGuide { get; set; } = new StyleGuide();
+        public List<string> ValidLanguages { get; set; } = new List<string>();
+        public ValidationRules ValidationRules { get; set; } = new ValidationRules();
+    }
+
+    /// <summary>
+    /// Supported documentation types
+    /// </summary>
+    public enum DocumentationType
+    {
+        API,
+        Implementation,
+        Architecture,
+        Tutorial,
+        PluginGuide,
+        SecurityGuidelines,
+        PerformanceGuidelines,
+        ResourceManagement,
+        TestingGuidelines
+    }
+
+    /// <summary>
+    /// Defines requirements for a specific type of documentation
+    /// </summary>
+    public class DocumentationRequirement
+    {
+        public DocumentationType Type { get; set; }
+        public List<string> RequiredSections { get; set; } = new List<string>();
+        public Dictionary<string, SectionRequirement> SectionRequirements { get; set; } = new Dictionary<string, SectionRequirement>();
+        public List<string> RequiredMetadata { get; set; } = new List<string>();
+        public List<string> OptionalSections { get; set; } = new List<string>();
+        public bool RequiresVersioning { get; set; }
+        public bool RequiresExamples { get; set; }
+        public bool RequiresDiagrams { get; set; }
+        public int MinimumWordCount { get; set; }
+    }
+
+    /// <summary>
+    /// Requirements for a specific documentation section
+    /// </summary>
+    public class SectionRequirement
+    {
+        public string Name { get; set; }
+        public string Description { get; set; }
+        public bool IsRequired { get; set; }
+        public int MinimumWordCount { get; set; }
+        public bool RequiresCode { get; set; }
+        public bool RequiresDiagram { get; set; }
+        public List<string> RequiredSubsections { get; set; } = new List<string>();
+        public List<string> RequiredMetadata { get; set; } = new List<string>();
+    }
+
+    /// <summary>
+    /// Documentation style guide and formatting rules
+    /// </summary>
+    public class StyleGuide
+    {
+        public MarkdownRules MarkdownRules { get; set; } = new MarkdownRules();
+        public CodeExampleRules CodeExampleRules { get; set; } = new CodeExampleRules();
+        public DiagramRules DiagramRules { get; set; } = new DiagramRules();
+        public List<string> ProhibitedTerms { get; set; } = new List<string>();
+        public Dictionary<string, string> TermReplacements { get; set; } = new Dictionary<string, string>();
+        public List<string> Abbreviations { get; set; } = new List<string>();
+        public List<LinkValidationRule> LinkRules { get; set; } = new List<LinkValidationRule>();
+    }
+
+    /// <summary>
+    /// Rules for markdown formatting
+    /// </summary>
+    public class MarkdownRules
+    {
+        public int MaxHeaderDepth { get; set; } = 4;
+        public bool RequireHeaderSpacing { get; set; } = true;
+        public bool RequireBlankLinesAroundHeaders { get; set; } = true;
+        public bool RequireBlankLinesAroundLists { get; set; } = true;
+        public int MaxLineLength { get; set; } = 120;
+        public bool EnforceAtxHeaders { get; set; } = true;
+        public bool RequireFencedCodeBlocks { get; set; } = true;
+        public List<string> RequiredFrontMatter { get; set; } = new List<string>();
+    }
+
+    /// <summary>
+    /// Rules for code examples
+    /// </summary>
+    public class CodeExampleRules
+    {
+        public bool RequireLanguageSpecifier { get; set; } = true;
+        public bool RequireDescription { get; set; } = true;
+        public bool ValidateCodeCompilation { get; set; } = true;
+        public int MaxExampleLength { get; set; } = 100;
+        public List<string> RequiredComments { get; set; } = new List<string>();
+        public Dictionary<string, List<string>> LanguageSpecificRules { get; set; } = new Dictionary<string, List<string>>();
+    }
+
+    /// <summary>
+    /// Rules for diagrams
+    /// </summary>
+    public class DiagramRules
+    {
+        public List<string> SupportedFormats { get; set; } = new List<string>();
+        public bool RequireTitle { get; set; } = true;
+        public bool RequireDescription { get; set; } = true;
+        public bool ValidateReferences { get; set; } = true;
+        public int MaxDiagramComplexity { get; set; } = 50;
+        public Dictionary<string, List<string>> FormatSpecificRules { get; set; } = new Dictionary<string, List<string>>();
+    }
+
+    /// <summary>
+    /// Rules for link validation
+    /// </summary>
+    public class LinkValidationRule
+    {
+        public string Pattern { get; set; }
+        public bool AllowExternal { get; set; }
+        public bool RequireHttps { get; set; }
+        public List<string> AllowedDomains { get; set; } = new List<string>();
+        public bool ValidateTarget { get; set; }
+    }
+
+    /// <summary>
+    /// Rules for documentation validation
+    /// </summary>
+    public class ValidationRules
+    {
+        public bool EnforceWordCount { get; set; } = true;
+        public bool EnforceCodeExamples { get; set; } = true;
+        public bool EnforceDiagrams { get; set; } = true;
+        public bool ValidateLinks { get; set; } = true;
+        public bool ValidateCodeExamples { get; set; } = true;
+        public bool ValidateCrossReferences { get; set; } = true;
+        public bool EnforceVersioning { get; set; } = true;
+        public List<CustomValidationRule> CustomRules { get; set; } = new List<CustomValidationRule>();
+    }
+
+    /// <summary>
+    /// Custom validation rule definition
+    /// </summary>
+    public class CustomValidationRule
+    {
+        public string Name { get; set; }
+        public string Description { get; set; }
+        public string ValidationExpression { get; set; }
+        public IssueSeverity Severity { get; set; }
+        public string ErrorMessage { get; set; }
+        public bool IsEnabled { get; set; } = true;
+    }
+}
         public List<DocumentationIssue> Issues { get; set; } = new List<DocumentationIssue>();
         public DocumentationCoverageStats Coverage { get; set; } = new DocumentationCoverageStats();
         public List<string> Recommendations { get; set; } = new List<string>();
