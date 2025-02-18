@@ -24,7 +24,7 @@ namespace CodeBuddy.Core.Implementation.Documentation
         }
 
         /// <summary>
-        /// Generates complete documentation
+        /// Generates complete documentation with cross-component interactions, best practices, and API reference
         /// </summary>
         public async Task<DocumentationResult> GenerateDocumentationAsync(GenerationOptions options = null)
         {
@@ -105,9 +105,9 @@ namespace CodeBuddy.Core.Implementation.Documentation
         }
 
         /// <summary>
-        /// Gets documentation version history
+        /// Gets documentation version history with change tracking
         /// </summary>
-        public async Task<VersionHistoryResult> GetVersionHistoryAsync()
+        public async Task<VersionHistoryResult> GetVersionHistoryAsync(string fromVersion = null)
         {
             try
             {
@@ -153,6 +153,106 @@ namespace CodeBuddy.Core.Implementation.Documentation
             // This would involve scanning the docs directory and loading all relevant files
 
             return docs;
+        }
+
+        /// <summary>
+        /// Generates error handling and recovery documentation
+        /// </summary>
+        public async Task<ErrorHandlingDocumentation> GenerateErrorHandlingDocumentationAsync()
+        {
+            try
+            {
+                var docs = await _generator.GenerateErrorHandlingDocumentationAsync();
+                return docs;
+            }
+            catch (Exception ex)
+            {
+                return new ErrorHandlingDocumentation
+                {
+                    Success = false,
+                    Error = ex.Message
+                };
+            }
+        }
+
+        /// <summary>
+        /// Generates cross-component interaction documentation
+        /// </summary>
+        public async Task<CrossComponentDocumentation> GenerateCrossComponentDocumentationAsync()
+        {
+            try
+            {
+                var docs = await _generator.GenerateCrossComponentDocumentationAsync();
+                return docs;
+            }
+            catch (Exception ex)
+            {
+                return new CrossComponentDocumentation
+                {
+                    Success = false,
+                    Error = ex.Message
+                };
+            }
+        }
+
+        /// <summary>
+        /// Validates documentation completeness and updates documentation standards
+        /// </summary>
+        public async Task<DocumentationStandardsValidation> ValidateDocumentationStandardsAsync()
+        {
+            try
+            {
+                var result = await _validator.ValidateDocumentationStandardsAsync();
+                return result;
+            }
+            catch (Exception ex)
+            {
+                return new DocumentationStandardsValidation
+                {
+                    Success = false,
+                    Error = ex.Message
+                };
+            }
+        }
+
+        /// <summary>
+        /// Generates best practices documentation with performance implications
+        /// </summary>
+        public async Task<BestPracticesDocumentation> GenerateBestPracticesDocumentationAsync()
+        {
+            try
+            {
+                var docs = await _generator.GenerateBestPracticesDocumentationAsync();
+                return docs;
+            }
+            catch (Exception ex)
+            {
+                return new BestPracticesDocumentation
+                {
+                    Success = false,
+                    Error = ex.Message
+                };
+            }
+        }
+
+        /// <summary>
+        /// Generates workflow diagrams for complex operations
+        /// </summary>
+        public async Task<DiagramDocumentation> GenerateWorkflowDiagramsAsync()
+        {
+            try
+            {
+                var diagrams = await _generator.GenerateWorkflowDiagramsAsync();
+                return diagrams;
+            }
+            catch (Exception ex)
+            {
+                return new DiagramDocumentation
+                {
+                    Success = false,
+                    Error = ex.Message
+                };
+            }
         }
     }
 

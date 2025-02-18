@@ -4,50 +4,57 @@ using CodeBuddy.Core.Models.Documentation;
 namespace CodeBuddy.Core.Interfaces
 {
     /// <summary>
-    /// Interface for the comprehensive documentation generation system
+    /// Interface for documentation generation system
     /// </summary>
     public interface IDocumentationGenerator
     {
         /// <summary>
-        /// Generates comprehensive API documentation for the codebase including XML docs,
-        /// method signatures, and cross-references
+        /// Generates complete API documentation
         /// </summary>
         Task<DocumentationResult> GenerateApiDocumentationAsync();
 
         /// <summary>
-        /// Generates documentation for the plugin system including configuration templates
-        /// and developer guidelines
+        /// Generates plugin system documentation
         /// </summary>
         Task<DocumentationResult> GeneratePluginDocumentationAsync();
 
         /// <summary>
-        /// Generates documentation for the validation pipeline including error handling
-        /// and performance guidelines
+        /// Generates validation pipeline documentation
         /// </summary>
         Task<DocumentationResult> GenerateValidationDocumentationAsync();
 
         /// <summary>
-        /// Extracts and validates code examples from test cases and documentation
+        /// Generates cross-component interaction documentation
         /// </summary>
-        Task<List<CodeExample>> ExtractCodeExamplesAsync();
+        Task<CrossComponentDocumentation> GenerateCrossComponentDocumentationAsync();
 
         /// <summary>
-        /// Validates documentation coverage and accuracy across the codebase
+        /// Generates implementation patterns and best practices documentation
+        /// </summary>
+        Task<BestPracticesDocumentation> GenerateBestPracticesDocumentationAsync();
+
+        /// <summary>
+        /// Validates documentation completeness and integrity
         /// </summary>
         Task<DocumentationValidationResult> ValidateDocumentationAsync();
 
         /// <summary>
-        /// Generates cross-reference links between related components
+        /// Generates cross-reference documentation between components
         /// </summary>
         Task<CrossReferenceResult> GenerateCrossReferencesAsync();
 
         /// <summary>
-        /// Analyzes XML documentation coverage and completeness
+        /// Analyzes documentation coverage and completeness
         /// </summary>
         Task<DocumentationCoverageResult> AnalyzeDocumentationCoverageAsync();
 
         /// <summary>
-        /// Generates resource management and usage pattern documentation
+        /// Extracts code examples from tests and XML documentation
+        /// </summary>
+        Task<List<CodeExample>> ExtractCodeExamplesAsync();
+
+        /// <summary>
+        /// Generates resource management patterns documentation
         /// </summary>
         Task<ResourcePatternDocumentation> GenerateResourcePatternsAsync();
     }
