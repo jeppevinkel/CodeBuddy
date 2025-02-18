@@ -351,6 +351,15 @@ public class ValidationPipeline
         public double MemoryUsageMB { get; set; }
         public double DiskIoMBPS { get; set; }
         public int ActiveThreads { get; set; }
+        public double MemoryAllocationRate { get; set; }
+        public double GCCollectionFrequency { get; set; }
+        public double ThreadPoolUtilization { get; set; }
+        public double DiskQueueLength { get; set; }
+        public double NetworkBandwidthUsage { get; set; }
+        public int PendingValidations { get; set; }
+        public double ValidationThroughput { get; set; }
+        public double AverageValidationLatency { get; set; }
+        public Dictionary<string, double> CustomMetrics { get; set; } = new();
     }
 
     private void StartResourceMonitoring()
@@ -509,44 +518,94 @@ public class ValidationPipeline
 
     private async void EmitResourceMetrics()
     {
+        var process = System.Diagnostics.Process.GetCurrentProcess();
         var metrics = new ResourceMetrics
         {
             CpuUsagePercent = GetCpuUsage(),
             MemoryUsageMB = GetMemoryUsage(),
             DiskIoMBPS = GetDiskIoRate(),
-            ActiveThreads = GetActiveThreadCount()
+            ActiveThreads = GetActiveThreadCount(),
+            MemoryAllocationRate = CalculateMemoryAllocationRate(),
+            GCCollectionFrequency = CalculateGCFrequency(),
+            ThreadPoolUtilization = GetThreadPoolUtilization(),
+            DiskQueueLength = GetDiskQueueLength(),
+            NetworkBandwidthUsage = GetNetworkBandwidthUsage(),
+            PendingValidations = _validationThrottle.CurrentCount,
+            ValidationThroughput = CalculateValidationThroughput(),
+            AverageValidationLatency = CalculateAverageValidationLatency(),
+            CustomMetrics = CollectCustomMetrics()
         };
         _metricsAggregator.RecordResourceUtilization(metrics);
 
-        // Send metrics to alert manager for analysis
-        await _alertManager.ProcessMetricsAsync(new Dictionary<ResourceMetricType, double>
+        // Build comprehensive metrics for alert manager
+        var metricMap = new Dictionary<ResourceMetricType, double>
         {
             [ResourceMetricType.CPU] = metrics.CpuUsagePercent,
             [ResourceMetricType.Memory] = metrics.MemoryUsageMB,
-            [ResourceMetricType.DiskIO] = metrics.DiskIoMBPS
-        }, "ValidationPipeline");
+            [ResourceMetricType.DiskIO] = metrics.DiskIoMBPS,
+            [ResourceMetricType.ThreadPool] = metrics.ThreadPoolUtilization,
+            [ResourceMetricType.GC] = metrics.GCCollectionFrequency,
+            [ResourceMetricType.Network] = metrics.NetworkBandwidthUsage,
+            [ResourceMetricType.ValidationThroughput] = metrics.ValidationThroughput,
+            [ResourceMetricType.ValidationLatency] = metrics.AverageValidationLatency
+        };
 
-        // Store metrics in analytics system
-        await _resourceAnalytics.StoreResourceUsageDataAsync(new ResourceUsageData
+        // Send metrics to alert manager for analysis with detailed context
+        await _alertManager.ProcessMetricsAsync(metricMap, "ValidationPipeline");
+
+        // Store detailed metrics in analytics system
+        var usageData = new ResourceUsageData
         {
             PipelineId = "ValidationPipeline",
             ValidatorType = "System",
             CpuUsagePercentage = metrics.CpuUsagePercent,
             MemoryUsageMB = metrics.MemoryUsageMB,
-            DiskIOBytesPerSecond = metrics.DiskIoMBPS * 1024 * 1024, // Convert from MB/s to B/s
+            DiskIOBytesPerSecond = metrics.DiskIoMBPS * 1024 * 1024,
+            ThreadPoolUtilization = metrics.ThreadPoolUtilization,
+            GCCollectionFrequency = metrics.GCCollectionFrequency,
+            NetworkBandwidthUsage = metrics.NetworkBandwidthUsage,
+            ValidationThroughput = metrics.ValidationThroughput,
+            ValidationLatency = metrics.AverageValidationLatency,
+            ActiveThreadCount = metrics.ActiveThreads,
+            PendingValidations = metrics.PendingValidations,
+            CustomMetrics = metrics.CustomMetrics,
             Timestamp = DateTime.UtcNow
-        });
+        };
 
-        // Analyze for potential bottlenecks
-        var bottlenecks = await _resourceAnalytics.IdentifyBottlenecksAsync();
+        await _resourceAnalytics.StoreResourceUsageDataAsync(usageData);
+
+        // Perform comprehensive bottleneck analysis
+        var bottlenecks = await _resourceAnalytics.IdentifyBottlenecksAsync(new AnalysisOptions
+        {
+            IncludeHistoricalTrends = true,
+            LookbackPeriod = TimeSpan.FromHours(24),
+            AnalysisGranularity = TimeSpan.FromMinutes(5),
+            ResourceTypes = new[]
+            {
+                ResourceMetricType.CPU,
+                ResourceMetricType.Memory,
+                ResourceMetricType.DiskIO,
+                ResourceMetricType.ThreadPool,
+                ResourceMetricType.GC,
+                ResourceMetricType.Network,
+                ResourceMetricType.ValidationThroughput,
+                ResourceMetricType.ValidationLatency
+            }
+        });
         foreach (var bottleneck in bottlenecks)
         {
+            var severity = DetermineAlertSeverity(bottleneck);
             await _alertManager.RaiseResourceAlert(new ResourceAlert
             {
                 ResourceType = bottleneck.ResourceType,
-                Severity = AlertSeverity.Warning,
-                Message = $"Potential bottleneck detected: {bottleneck.Impact}",
-                RecommendedAction = bottleneck.RecommendedAction
+                Severity = severity,
+                Message = $"Resource bottleneck detected: {bottleneck.Impact}",
+                RecommendedAction = bottleneck.RecommendedAction,
+                TrendData = bottleneck.TrendAnalysis,
+                ProjectedTimeToThreshold = bottleneck.ProjectedTimeToThreshold,
+                AffectedComponents = bottleneck.AffectedComponents,
+                MitigationSteps = bottleneck.MitigationSteps,
+                HistoricalContext = bottleneck.HistoricalContext
             });
         }
     }
@@ -571,5 +630,102 @@ public class ValidationPipeline
     private int GetActiveThreadCount()
     {
         return System.Diagnostics.Process.GetCurrentProcess().Threads.Count;
+    }
+
+    private double CalculateMemoryAllocationRate()
+    {
+        var process = System.Diagnostics.Process.GetCurrentProcess();
+        var initialMemory = process.PrivateMemorySize64;
+        Thread.Sleep(100); // Sample over 100ms
+        var finalMemory = process.PrivateMemorySize64;
+        return (finalMemory - initialMemory) / (1024.0 * 1024.0 * 0.1); // MB/s
+    }
+
+    private double CalculateGCFrequency()
+    {
+        var gcCount = GC.CollectionCount(0) + GC.CollectionCount(1) + GC.CollectionCount(2);
+        var uptime = DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime();
+        return gcCount / uptime.TotalMinutes; // Collections per minute
+    }
+
+    private double GetThreadPoolUtilization()
+    {
+        ThreadPool.GetAvailableThreads(out int workerThreads, out int completionPortThreads);
+        ThreadPool.GetMaxThreads(out int maxWorkerThreads, out int maxCompletionPortThreads);
+        
+        var workerThreadUtilization = (maxWorkerThreads - workerThreads) / (double)maxWorkerThreads * 100;
+        var ioThreadUtilization = (maxCompletionPortThreads - completionPortThreads) / (double)maxCompletionPortThreads * 100;
+        
+        return Math.Max(workerThreadUtilization, ioThreadUtilization);
+    }
+
+    private double GetDiskQueueLength()
+    {
+        try
+        {
+            var drives = DriveInfo.GetDrives();
+            var systemDrive = drives.FirstOrDefault(d => d.IsReady && d.RootDirectory.FullName == Path.GetPathRoot(Environment.SystemDirectory));
+            if (systemDrive != null)
+            {
+                // This is a simplified approximation - in production you'd use performance counters
+                return systemDrive.AvailableFreeSpace < 1024 * 1024 * 100 ? 1.0 : 0.0; // Simple threshold at 100MB
+            }
+            return 0.0;
+        }
+        catch
+        {
+            return 0.0;
+        }
+    }
+
+    private double GetNetworkBandwidthUsage()
+    {
+        var process = Process.GetCurrentProcess();
+        // This is a simplified version - in production you'd use performance counters
+        return (process.ReadBytes + process.WriteBytes) / (1024.0 * 1024.0); // MB/s
+    }
+
+    private double CalculateValidationThroughput()
+    {
+        var recentMetrics = _resourceHistory
+            .Where(m => (DateTime.UtcNow - m.Timestamp) <= TimeSpan.FromMinutes(1))
+            .ToList();
+
+        if (recentMetrics.Count < 2) return 0;
+
+        var periodSeconds = (recentMetrics.Last().Timestamp - recentMetrics.First().Timestamp).TotalSeconds;
+        if (periodSeconds <= 0) return 0;
+
+        return _metrics.Values.Sum(m => m.TotalSuccesses) / periodSeconds;
+    }
+
+    private double CalculateAverageValidationLatency()
+    {
+        var recentMetrics = _metrics.Values
+            .Where(m => m.LastSuccessfulDuration > TimeSpan.Zero)
+            .Select(m => m.LastSuccessfulDuration.TotalMilliseconds)
+            .ToList();
+
+        return recentMetrics.Any() ? recentMetrics.Average() : 0;
+    }
+
+    private Dictionary<string, double> CollectCustomMetrics()
+    {
+        return new Dictionary<string, double>
+        {
+            ["validation_queue_depth"] = _validationThrottle.CurrentCount,
+            ["critical_validations"] = _criticalValidationReservations.Values.Sum(),
+            ["throttling_level"] = _isThrottled ? 1.0 : 0.0,
+            ["resource_trend"] = CalculateResourceTrend(_resourceHistory.ToList())
+        };
+    }
+
+    private AlertSeverity DetermineAlertSeverity(ResourceBottleneck bottleneck)
+    {
+        if (bottleneck.ImpactLevel >= 0.8) return AlertSeverity.Critical;
+        if (bottleneck.ImpactLevel >= 0.6) return AlertSeverity.High;
+        if (bottleneck.ImpactLevel >= 0.4) return AlertSeverity.Medium;
+        if (bottleneck.ImpactLevel >= 0.2) return AlertSeverity.Warning;
+        return AlertSeverity.Info;
     }
 }
