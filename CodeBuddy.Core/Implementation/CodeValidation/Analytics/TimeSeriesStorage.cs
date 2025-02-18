@@ -29,12 +29,48 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Analytics
         public CompressionLevel CompressionLevel { get; set; } = CompressionLevel.Optimal;
     }
 
+    public class StorageHealthStatus
+    {
+        public bool IsHealthy { get; set; }
+        public long TotalStorageSize { get; set; }
+        public int DataPointCount { get; set; }
+        public DateTime OldestDataPoint { get; set; }
+        public DateTime NewestDataPoint { get; set; }
+        public TimeSpan AverageWriteLatency { get; set; }
+        public TimeSpan AverageReadLatency { get; set; }
+        public string LastError { get; set; }
+    }
+
+    public class AggregatedDataPoint
+    {
+        public DateTime Timestamp { get; set; }
+        public Dictionary<string, double> Metrics { get; set; }
+        public Dictionary<string, string> Tags { get; set; }
+        public int SampleCount { get; set; }
+    }
+
+    public enum AggregationType
+    {
+        Average,
+        Sum,
+        Min,
+        Max,
+        Count
+    }
+
     public interface ITimeSeriesStorage
     {
         Task StoreDataPointAsync(TimeSeriesDataPoint dataPoint);
         Task<IEnumerable<TimeSeriesDataPoint>> GetDataPointsAsync(DateTime startTime, DateTime endTime);
         Task<IEnumerable<TimeSeriesDataPoint>> GetDataPointsAsync(DateTime startTime, DateTime endTime, Dictionary<string, string> tags);
         Task PruneDataAsync(DateTime olderThan);
+        Task<IEnumerable<AggregatedDataPoint>> GetAggregatedDataAsync(
+            DateTime startTime,
+            DateTime endTime,
+            TimeSpan aggregationInterval,
+            Dictionary<string, AggregationType> metricAggregations,
+            Dictionary<string, string> tags = null);
+        Task<StorageHealthStatus> GetHealthStatusAsync();
     }
 
     public class TimeSeriesStorage : ITimeSeriesStorage, IDisposable
@@ -141,7 +177,10 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Analytics
             if (_disposed)
                 throw new ObjectDisposedException(nameof(TimeSeriesStorage));
 
-            // Sample data based on sampling rate
+            var startOperation = DateTime.UtcNow;
+            try
+            {
+                // Sample data based on sampling rate
             var lastPoint = _inMemoryDataPoints.LastOrDefault();
             if (lastPoint != null && 
                 (dataPoint.Timestamp - lastPoint.Timestamp) < _options.SamplingRate)
@@ -274,6 +313,159 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Analytics
                         }
                     }
                 }
+            }
+        }
+
+        private readonly Dictionary<string, TimeSpan> _operationLatencies = new Dictionary<string, TimeSpan>();
+        private string _lastError;
+        private readonly object _healthLock = new object();
+
+        private void TrackOperationLatency(string operation, TimeSpan latency)
+        {
+            lock (_healthLock)
+            {
+                _operationLatencies[operation] = latency;
+            }
+        }
+
+        private void TrackError(string error)
+        {
+            lock (_healthLock)
+            {
+                _lastError = error;
+            }
+        }
+
+        public async Task<StorageHealthStatus> GetHealthStatusAsync()
+        {
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(TimeSeriesStorage));
+
+            var status = new StorageHealthStatus();
+            
+            try
+            {
+                // Calculate storage size
+                status.TotalStorageSize = Directory.GetFiles(_options.StoragePath, "timeseries_*.dat")
+                    .Sum(f => new FileInfo(f).Length);
+
+                // Get data point statistics
+                var allPoints = await GetDataPointsAsync(DateTime.MinValue, DateTime.MaxValue);
+                var points = allPoints.ToList();
+                
+                status.DataPointCount = points.Count;
+                if (points.Any())
+                {
+                    status.OldestDataPoint = points.Min(p => p.Timestamp);
+                    status.NewestDataPoint = points.Max(p => p.Timestamp);
+                }
+
+                // Get operation latencies
+                lock (_healthLock)
+                {
+                    if (_operationLatencies.ContainsKey("write"))
+                        status.AverageWriteLatency = _operationLatencies["write"];
+                    if (_operationLatencies.ContainsKey("read"))
+                        status.AverageReadLatency = _operationLatencies["read"];
+                    status.LastError = _lastError;
+                }
+
+                status.IsHealthy = true;
+            }
+            catch (Exception ex)
+            {
+                status.IsHealthy = false;
+                status.LastError = ex.Message;
+                TrackError(ex.Message);
+            }
+
+            return status;
+        }
+
+        public async Task<IEnumerable<AggregatedDataPoint>> GetAggregatedDataAsync(
+            DateTime startTime,
+            DateTime endTime,
+            TimeSpan aggregationInterval,
+            Dictionary<string, AggregationType> metricAggregations,
+            Dictionary<string, string> tags = null)
+        {
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(TimeSeriesStorage));
+
+            var startOperation = DateTime.UtcNow;
+            try
+            {
+                var rawData = await GetDataPointsAsync(startTime, endTime, tags);
+                var groupedData = rawData
+                    .GroupBy(p => new DateTime(
+                        p.Timestamp.Ticks / aggregationInterval.Ticks * aggregationInterval.Ticks,
+                        DateTimeKind.Utc));
+
+                var aggregatedPoints = new List<AggregatedDataPoint>();
+
+                foreach (var group in groupedData)
+                {
+                    var points = group.ToList();
+                    var aggregatedMetrics = new Dictionary<string, double>();
+
+                    foreach (var metricAgg in metricAggregations)
+                    {
+                        var metricName = metricAgg.Key;
+                        var aggregationType = metricAgg.Value;
+
+                        var metricValues = points
+                            .Where(p => p.Metrics.ContainsKey(metricName))
+                            .Select(p => p.Metrics[metricName])
+                            .ToList();
+
+                        if (!metricValues.Any())
+                            continue;
+
+                        double aggregatedValue = 0;
+                        switch (aggregationType)
+                        {
+                            case AggregationType.Average:
+                                aggregatedValue = metricValues.Average();
+                                break;
+                            case AggregationType.Sum:
+                                aggregatedValue = metricValues.Sum();
+                                break;
+                            case AggregationType.Min:
+                                aggregatedValue = metricValues.Min();
+                                break;
+                            case AggregationType.Max:
+                                aggregatedValue = metricValues.Max();
+                                break;
+                            case AggregationType.Count:
+                                aggregatedValue = metricValues.Count;
+                                break;
+                        }
+
+                        aggregatedMetrics[metricName] = aggregatedValue;
+                    }
+
+                    var commonTags = points
+                        .SelectMany(p => p.Tags)
+                        .GroupBy(t => t.Key)
+                        .Where(g => g.Select(t => t.Value).Distinct().Count() == 1)
+                        .ToDictionary(g => g.Key, g => g.First().Value);
+
+                    aggregatedPoints.Add(new AggregatedDataPoint
+                    {
+                        Timestamp = group.Key,
+                        Metrics = aggregatedMetrics,
+                        Tags = commonTags,
+                        SampleCount = points.Count
+                    });
+                }
+
+                TrackOperationLatency("read", DateTime.UtcNow - startOperation);
+                return aggregatedPoints.OrderBy(p => p.Timestamp);
+            }
+            catch (Exception ex)
+            {
+                TrackError(ex.Message);
+                throw;
             }
         }
 
