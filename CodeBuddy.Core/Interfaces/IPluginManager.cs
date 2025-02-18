@@ -1,7 +1,13 @@
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using CodeBuddy.Core.Models;
+using CodeBuddy.Core.Models.Marketplace;
+
 namespace CodeBuddy.Core.Interfaces;
 
 /// <summary>
-/// Manages plugin lifecycle and operations with hot-reload capabilities
+/// Manages plugin lifecycle, operations, and marketplace integration with hot-reload capabilities
 /// </summary>
 public interface IPluginManager
 {
@@ -49,4 +55,29 @@ public interface IPluginManager
     /// Gets the health status of all plugins
     /// </summary>
     Task<IEnumerable<PluginHealthStatus>> GetAllPluginsHealthAsync();
+
+    /// <summary>
+    /// Gets a specific plugin by its ID
+    /// </summary>
+    Task<IPlugin> GetPluginAsync(string pluginId);
+
+    /// <summary>
+    /// Installs a plugin from a package byte array
+    /// </summary>
+    Task<IPlugin> InstallPluginAsync(byte[] packageData);
+
+    /// <summary>
+    /// Uninstalls a plugin
+    /// </summary>
+    Task<bool> UninstallPluginAsync(string pluginId);
+
+    /// <summary>
+    /// Checks for plugin updates
+    /// </summary>
+    Task<IEnumerable<PluginUpdateInfo>> CheckForUpdatesAsync();
+
+    /// <summary>
+    /// Gets plugin dependencies
+    /// </summary>
+    Task<IEnumerable<PluginDependency>> GetPluginDependenciesAsync(string pluginId);
 }
