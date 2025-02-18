@@ -16,6 +16,7 @@ public class ValidationPipeline
     private readonly IMetricsAggregator _metricsAggregator;
     private readonly IResourceAlertManager _alertManager;
     private readonly IResourceAnalytics _resourceAnalytics;
+    private readonly IValidationCache _validationCache;
     
     // Resource throttling state
     private readonly SemaphoreSlim _validationThrottle;
@@ -29,7 +30,8 @@ public class ValidationPipeline
         ValidationResilienceConfig config,
         IMetricsAggregator metricsAggregator,
         IResourceAlertManager alertManager,
-        IResourceAnalytics resourceAnalytics)
+        IResourceAnalytics resourceAnalytics,
+        IValidationCache validationCache)
     {
         _logger = logger;
         _middleware = new List<IValidationMiddleware>();
@@ -39,6 +41,7 @@ public class ValidationPipeline
         _metricsAggregator = metricsAggregator;
         _alertManager = alertManager;
         _resourceAnalytics = resourceAnalytics;
+        _validationCache = validationCache;
         
         // Initialize resource throttling
         _validationThrottle = new SemaphoreSlim(config.MaxConcurrentValidations);
@@ -58,6 +61,16 @@ public class ValidationPipeline
 
     public async Task<ValidationResult> ExecuteAsync(ValidationContext context)
     {
+        // Try to get result from cache first
+        var codeHash = ComputeCodeHash(context.Code);
+        var (found, cachedResult) = await _validationCache.TryGetAsync(codeHash, context.Options);
+        
+        if (found)
+        {
+            _logger.LogInformation("Validation result found in cache for code hash: {CodeHash}", codeHash);
+            return cachedResult;
+        }
+
         var result = new ValidationResult
         {
             State = ValidationState.InProgress,
@@ -92,6 +105,12 @@ public class ValidationPipeline
                 : ValidationState.Completed;
             
             result.IsPartialSuccess = result.FailedMiddleware.Any() && result.IsValid;
+            
+            // Cache the result before returning
+            if (result.IsValid || result.IsPartialSuccess)
+            {
+                await _validationCache.SetAsync(codeHash, context.Options, result);
+            }
             
             return result;
         }
@@ -343,6 +362,13 @@ public class ValidationPipeline
     {
         public DateTime Timestamp { get; set; }
         public ResourceMetrics Metrics { get; set; }
+    }
+
+    private string ComputeCodeHash(string code)
+    {
+        using var sha256 = System.Security.Cryptography.SHA256.Create();
+        var hashBytes = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(code));
+        return Convert.ToBase64String(hashBytes);
     }
 
     private class ResourceMetrics

@@ -1,6 +1,8 @@
 using System;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Configuration;
 using CodeBuddy.Core.Implementation.CodeValidation.Monitoring;
+using CodeBuddy.Core.Implementation.CodeValidation.Caching;
 using CodeBuddy.Core.Models;
 
 namespace CodeBuddy.Core.Extensions
@@ -49,6 +51,13 @@ namespace CodeBuddy.Core.Extensions
             services.AddSingleton(config);
             services.AddSingleton<IResourceAlertManager, ResourceAlertManager>();
 
+            return services;
+        }
+
+        public static IServiceCollection AddValidationCache(this IServiceCollection services, IConfiguration configuration)
+        {
+            services.Configure<ValidationCacheConfig>(configuration.GetSection("ValidationCache"));
+            services.AddSingleton<IValidationCache, ValidationCache>();
             return services;
         }
     }
