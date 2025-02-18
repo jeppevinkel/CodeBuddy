@@ -1,27 +1,34 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using CodeBuddy.Core.Models;
 using CodeBuddy.Core.Models.Analytics;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation.Monitoring
 {
+    /// <summary>
+    /// Provides a comprehensive dashboard for monitoring validation middleware performance,
+    /// resource usage, and health metrics.
+    /// </summary>
     public class ValidationPipelineDashboard
     {
-        private readonly MetricsAggregator _metricsAggregator;
-        private readonly ResourceAlertManager _alertManager;
-        private readonly ResourceAnalytics _resourceAnalytics;
-        private readonly MemoryAnalyticsDashboard _memoryAnalytics;
-        private readonly ResourceTrendAnalyzer _trendAnalyzer;
-        private readonly TimeSeriesStorage _timeSeriesStorage;
+        private readonly IMetricsAggregator _metricsAggregator;
+        private readonly IResourceAlertManager _alertManager;
+        private readonly IResourceAnalytics _resourceAnalytics;
+        private readonly IMemoryAnalyticsDashboard _memoryAnalytics;
+        private readonly IResourceTrendAnalyzer _trendAnalyzer;
+        private readonly ITimeSeriesStorage _timeSeriesStorage;
+        private readonly IValidatorRegistry _validatorRegistry;
 
         public ValidationPipelineDashboard(
-            MetricsAggregator metricsAggregator,
-            ResourceAlertManager alertManager,
-            ResourceAnalytics resourceAnalytics,
-            MemoryAnalyticsDashboard memoryAnalytics,
-            ResourceTrendAnalyzer trendAnalyzer,
-            TimeSeriesStorage timeSeriesStorage)
+            IMetricsAggregator metricsAggregator,
+            IResourceAlertManager alertManager,
+            IResourceAnalytics resourceAnalytics,
+            IMemoryAnalyticsDashboard memoryAnalytics,
+            IResourceTrendAnalyzer trendAnalyzer,
+            ITimeSeriesStorage timeSeriesStorage,
+            IValidatorRegistry validatorRegistry)
         {
             _metricsAggregator = metricsAggregator;
             _alertManager = alertManager;
@@ -31,10 +38,29 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Monitoring
             _timeSeriesStorage = timeSeriesStorage;
         }
 
-        public async Task<PipelinePerformanceMetrics> GetRealtimeMetricsAsync()
+        /// <summary>
+        /// Gets real-time metrics for all validation middleware components.
+        /// </summary>
+        /// <returns>Comprehensive dashboard metrics including performance, health, and resource utilization.</returns>
+        public async Task<ValidationDashboardSummary> GetRealtimeMetricsAsync()
         {
-            var metrics = await _metricsAggregator.GetCurrentMetricsAsync();
-            return new PipelinePerformanceMetrics
+            var middlewares = _validatorRegistry.GetAllMiddleware();
+            var dashboardSummary = new ValidationDashboardSummary
+            {
+                Timestamp = DateTime.UtcNow,
+                MiddlewareMetrics = new Dictionary<string, ValidationMiddlewareMetrics>(),
+                SystemMetrics = await GetSystemWideMetricsAsync(),
+                SystemAlerts = await _alertManager.GetActiveAlertsAsync(),
+                Trends = await GetHistoricalTrendsAsync()
+            };
+
+            foreach (var middleware in middlewares)
+            {
+                var metrics = await GetMiddlewareMetricsAsync(middleware);
+                dashboardSummary.MiddlewareMetrics[middleware.Name] = metrics;
+            }
+
+            return dashboardSummary;
             {
                 Throughput = metrics.Throughput,
                 Latency = metrics.Latency,
@@ -84,15 +110,86 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Monitoring
             };
         }
 
-        private async Task<Dictionary<string, CircuitBreakerState>> GetCircuitBreakerStatesAsync()
+        private async Task<ValidationMiddlewareMetrics> GetMiddlewareMetricsAsync(IValidationMiddleware middleware)
         {
-            return await _metricsAggregator.GetCircuitBreakerStatesAsync();
+            var executionMetrics = await _metricsAggregator.GetMiddlewareExecutionMetricsAsync(middleware.Name);
+            var resourceMetrics = await _resourceAnalytics.GetMiddlewareResourceMetricsAsync(middleware.Name);
+            var circuitBreakerMetrics = await _metricsAggregator.GetCircuitBreakerMetricsAsync(middleware.Name);
+            var retryMetrics = await _metricsAggregator.GetRetryMetricsAsync(middleware.Name);
+
+            return new ValidationMiddlewareMetrics
+            {
+                MiddlewareName = middleware.Name,
+                SuccessMetrics = new SuccessFailureMetrics
+                {
+                    TotalRequests = executionMetrics.TotalRequests,
+                    SuccessfulRequests = executionMetrics.SuccessfulRequests,
+                    FailedRequests = executionMetrics.FailedRequests,
+                    TopFailureCategories = await _metricsAggregator.GetTopFailureCategoriesAsync(middleware.Name)
+                },
+                PerformanceMetrics = new PerformanceMetrics
+                {
+                    AverageExecutionTime = executionMetrics.AverageExecutionTime,
+                    P95ExecutionTime = executionMetrics.P95ExecutionTime,
+                    P99ExecutionTime = executionMetrics.P99ExecutionTime,
+                    RequestsPerSecond = executionMetrics.RequestsPerSecond,
+                    ConcurrentExecutions = executionMetrics.ConcurrentExecutions
+                },
+                CircuitBreakerMetrics = circuitBreakerMetrics,
+                RetryMetrics = retryMetrics,
+                ResourceMetrics = resourceMetrics,
+                ActiveAlerts = await _alertManager.GetActiveAlertsForMiddlewareAsync(middleware.Name)
+            };
         }
 
-        private async Task<Dictionary<string, MiddlewarePerformanceMetrics>> GetMiddlewarePerformanceAsync(
-            DateTime startTime, DateTime endTime)
+        private async Task<SystemWideMetrics> GetSystemWideMetricsAsync()
         {
-            return await _metricsAggregator.GetMiddlewarePerformanceAsync(startTime, endTime);
+            var overallMetrics = await _metricsAggregator.GetSystemWideMetricsAsync();
+            var resourceMetrics = await _resourceAnalytics.GetSystemResourceMetricsAsync();
+            var circuitBreakerStates = await _metricsAggregator.GetCircuitBreakerStatesAsync();
+
+            return new SystemWideMetrics
+            {
+                OverallSuccessRate = overallMetrics.SuccessRate,
+                AverageResponseTime = overallMetrics.AverageResponseTime.TotalMilliseconds,
+                TotalActiveValidations = overallMetrics.ActiveValidations,
+                TotalResourceUtilization = resourceMetrics,
+                ActiveCircuitBreakers = circuitBreakerStates.Count(x => x.Value.State == CircuitBreakerState.Open),
+                TotalAlerts = (await _alertManager.GetActiveAlertsAsync()).Count
+            };
+        }
+
+        private async Task<HistoricalTrends> GetHistoricalTrendsAsync()
+        {
+            var timeRange = TimeSpan.FromHours(24);
+            var endTime = DateTime.UtcNow;
+            var startTime = endTime.Subtract(timeRange);
+
+            return new HistoricalTrends
+            {
+                SuccessRates = await _timeSeriesStorage.GetMetricTimeSeriesAsync("success_rate", startTime, endTime),
+                ResponseTimes = await _timeSeriesStorage.GetMetricTimeSeriesAsync("response_time", startTime, endTime),
+                ResourceUtilization = await _timeSeriesStorage.GetMetricTimeSeriesAsync("resource_utilization", startTime, endTime),
+                ThroughputRates = await _timeSeriesStorage.GetMetricTimeSeriesAsync("throughput", startTime, endTime)
+            };
+        }
+
+        public async Task<ExportableReport> GenerateExportableReportAsync(DateTime startTime, DateTime endTime)
+        {
+            var report = await GetHistoricalAnalysisAsync(startTime, endTime);
+            var insights = await GetOperationalInsightsAsync();
+            
+            return new ExportableReport
+            {
+                TimeRange = new TimeRange { Start = startTime, End = endTime },
+                PerformanceMetrics = report.PerformanceTrends,
+                ResourceUtilization = report.ResourcePatterns,
+                FailureAnalysis = report.FailureAnalysis,
+                MiddlewarePerformance = report.MiddlewarePerformance,
+                Recommendations = insights.OptimizationRecommendations,
+                Bottlenecks = insights.BottleneckAnalysis,
+                AlertHistory = await _alertManager.GetHistoricalAlertsAsync(startTime, endTime)
+            };
         }
     }
 
