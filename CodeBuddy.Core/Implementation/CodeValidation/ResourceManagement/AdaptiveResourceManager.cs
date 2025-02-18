@@ -8,6 +8,7 @@ using CodeBuddy.Core.Models.ResourceManagement;
 using CodeBuddy.Core.Models;
 using CodeBuddy.Core.Implementation.CodeValidation.Analytics;
 using CodeBuddy.Core.Implementation.CodeValidation.Monitoring;
+using CodeBuddy.Core.Implementation.CodeValidation.Logging;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation.ResourceManagement
 {
@@ -20,13 +21,15 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.ResourceManagement
         private readonly AdaptiveResourceConfig _config;
         private readonly ConcurrentDictionary<string, Queue<ResourceUsagePattern>> _usagePatterns;
         private readonly ConcurrentDictionary<string, ResourcePrediction> _predictions;
+        private readonly IResourceLoggingService _loggingService;
         
         public AdaptiveResourceManager(
             TimeSeriesStorage timeSeriesStorage,
             ResourceTrendAnalyzer resourceTrendAnalyzer,
             ResourceMonitoringDashboard monitoringDashboard,
             MemoryLeakPreventionSystem memoryLeakPrevention,
-            AdaptiveResourceConfig config)
+            AdaptiveResourceConfig config,
+            IResourceLoggingService loggingService)
         {
             _timeSeriesStorage = timeSeriesStorage;
             _resourceTrendAnalyzer = resourceTrendAnalyzer;
@@ -35,10 +38,25 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.ResourceManagement
             _config = config;
             _usagePatterns = new ConcurrentDictionary<string, Queue<ResourceUsagePattern>>();
             _predictions = new ConcurrentDictionary<string, ResourcePrediction>();
+            _loggingService = loggingService ?? throw new ArgumentNullException(nameof(loggingService));
         }
 
         public async Task CollectResourceMetrics(string validationType, ResourceUsagePattern pattern)
         {
+            var metrics = new Dictionary<string, object>
+            {
+                { "ValidationType", validationType },
+                { "MemoryUsage", pattern.MemoryUsage },
+                { "ProcessingDuration", pattern.ProcessingDuration },
+                { "PatternCollectionTime", DateTime.UtcNow }
+            };
+            
+            _loggingService.LogResourceAllocation(
+                validationType,
+                "MetricsCollection",
+                metrics,
+                nameof(AdaptiveResourceManager));
+
             var patterns = _usagePatterns.GetOrAdd(validationType, _ => new Queue<ResourceUsagePattern>());
             patterns.Enqueue(pattern);
 
@@ -50,14 +68,54 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.ResourceManagement
 
             await _timeSeriesStorage.StoreMetricsAsync(validationType, pattern);
             await UpdatePredictions(validationType);
+
+            metrics["PredictionUpdated"] = true;
+            metrics["PredictionConfidence"] = _predictions.TryGetValue(validationType, out var pred) ? pred.PredictionConfidence : 0;
+            
+            _loggingService.LogResourceAllocation(
+                validationType,
+                "PredictionUpdate",
+                metrics,
+                nameof(AdaptiveResourceManager));
         }
 
         public async Task<ResourceAllocation> GetOptimalResourceAllocation(string validationType)
         {
+            var metrics = new Dictionary<string, object>
+            {
+                { "ValidationType", validationType },
+                { "RequestTime", DateTime.UtcNow }
+            };
+
             if (_predictions.TryGetValue(validationType, out var prediction) && 
                 prediction.PredictionConfidence >= _config.PredictionThreshold)
             {
-                return new ResourceAllocation
+                var allocation = new ResourceAllocation
+                {
+                    ThreadCount = prediction.RecommendedThreadCount,
+                    MemoryLimit = prediction.ExpectedMemoryUsage,
+                    QueueSize = CalculateOptimalQueueSize(prediction),
+                    BatchSize = CalculateOptimalBatchSize(prediction)
+                };
+
+                metrics["AllocationType"] = "Predicted";
+                metrics["ThreadCount"] = allocation.ThreadCount;
+                metrics["MemoryLimit"] = allocation.MemoryLimit;
+                metrics["QueueSize"] = allocation.QueueSize;
+                metrics["BatchSize"] = allocation.BatchSize;
+                metrics["PredictionConfidence"] = prediction.PredictionConfidence;
+
+                _loggingService.LogResourceAllocation(
+                    validationType,
+                    "OptimalAllocation",
+                    metrics,
+                    nameof(AdaptiveResourceManager));
+
+                return allocation;
+            }
+
+            // Fallback to default allocation if prediction not available
+            var defaultAllocation = new ResourceAllocation
                 {
                     ThreadCount = prediction.RecommendedThreadCount,
                     MemoryLimit = prediction.ExpectedMemoryUsage,
@@ -66,8 +124,19 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.ResourceManagement
                 };
             }
 
-            // Fallback to default allocation if prediction not available
-            return new ResourceAllocation
+            metrics["AllocationType"] = "Default";
+            metrics["ThreadCount"] = defaultAllocation.ThreadCount;
+            metrics["MemoryLimit"] = defaultAllocation.MemoryLimit;
+            metrics["QueueSize"] = defaultAllocation.QueueSize;
+            metrics["BatchSize"] = defaultAllocation.BatchSize;
+            
+            _loggingService.LogResourceWarning(
+                validationType,
+                "Using default allocation due to insufficient prediction confidence",
+                metrics,
+                nameof(AdaptiveResourceManager));
+
+            return defaultAllocation;
             {
                 ThreadCount = _config.MinThreadPoolSize,
                 MemoryLimit = _config.MinMemoryThreshold,
@@ -80,6 +149,14 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.ResourceManagement
         {
             if (!_usagePatterns.TryGetValue(validationType, out var patterns) || patterns.Count < 10)
             {
+                _loggingService.LogResourceWarning(
+                    validationType,
+                    "Insufficient patterns for prediction update",
+                    new Dictionary<string, object> {
+                        { "PatternCount", patterns?.Count ?? 0 },
+                        { "MinimumRequired", 10 }
+                    },
+                    nameof(AdaptiveResourceManager));
                 return;
             }
 
@@ -95,6 +172,21 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.ResourceManagement
 
             _predictions.AddOrUpdate(validationType, prediction, (_, __) => prediction);
             await UpdateDashboard(validationType, prediction);
+
+            var metrics = new Dictionary<string, object>
+            {
+                { "ValidationType", validationType },
+                { "PredictionConfidence", prediction.PredictionConfidence },
+                { "ExpectedMemoryUsage", prediction.ExpectedMemoryUsage },
+                { "RecommendedThreadCount", prediction.RecommendedThreadCount },
+                { "EstimatedDuration", prediction.EstimatedDuration }
+            };
+
+            _loggingService.LogResourceAllocation(
+                validationType,
+                "PredictionCreated",
+                metrics,
+                nameof(AdaptiveResourceManager));
         }
 
         private async Task UpdateDashboard(string validationType, ResourcePrediction prediction)

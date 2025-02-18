@@ -33,5 +33,7 @@ namespace CodeBuddy.Core.Models.Logging
         public Dictionary<string, object> Metadata { get; set; }
         public string Timestamp { get; set; }
         public string CorrelationId { get; set; }
+        public int ThreadId { get; set; }
+        public string ComponentName { get; set; }
     }
 }
