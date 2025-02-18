@@ -40,7 +40,13 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Analytics
                 {
                     { "CpuUsage", data.CpuUsagePercentage },
                     { "MemoryUsage", data.MemoryUsageMB },
-                    { "DiskIORate", data.DiskIOBytesPerSecond }
+                    { "DiskIORate", data.DiskIOBytesPerSecond },
+                    { "Gen0Size", data.Gen0SizeBytes },
+                    { "Gen1Size", data.Gen1SizeBytes },
+                    { "Gen2Size", data.Gen2SizeBytes },
+                    { "LohSize", data.LohSizeBytes },
+                    { "FinalizationQueueLength", data.FinalizationQueueLength },
+                    { "MemoryFragmentation", data.FragmentationPercent }
                 },
                 Tags = new Dictionary<string, string>
                 {
