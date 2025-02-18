@@ -14,6 +14,13 @@ public class ValidationPipeline
     private readonly ConcurrentDictionary<string, MiddlewareMetrics> _metrics;
     private readonly ValidationResilienceConfig _config;
     private readonly IMetricsAggregator _metricsAggregator;
+    
+    // Resource throttling state
+    private readonly SemaphoreSlim _validationThrottle;
+    private readonly ConcurrentQueue<ResourceSnapshot> _resourceHistory;
+    private readonly ConcurrentDictionary<string, int> _criticalValidationReservations;
+    private volatile bool _isThrottled;
+    private DateTime _lastThrottlingAdjustment;
 
     public ValidationPipeline(
         ILogger<ValidationPipeline> logger,
@@ -26,6 +33,15 @@ public class ValidationPipeline
         _metrics = new ConcurrentDictionary<string, MiddlewareMetrics>();
         _config = config;
         _metricsAggregator = metricsAggregator;
+        
+        // Initialize resource throttling
+        _validationThrottle = new SemaphoreSlim(config.MaxConcurrentValidations);
+        _resourceHistory = new ConcurrentQueue<ResourceSnapshot>();
+        _criticalValidationReservations = new ConcurrentDictionary<string, int>();
+        _lastThrottlingAdjustment = DateTime.UtcNow;
+        
+        // Start resource monitoring
+        StartResourceMonitoring();
     }
 
     public void AddMiddleware(IValidationMiddleware middleware)
@@ -44,6 +60,19 @@ public class ValidationPipeline
 
         try
         {
+            // Apply resource throttling
+            if (!await AcquireResourcesAsync(context))
+            {
+                result.State = ValidationState.Failed;
+                result.IsValid = false;
+                result.Issues.Add(new ValidationIssue
+                {
+                    Severity = ValidationSeverity.Error,
+                    Message = "Validation rejected due to resource constraints"
+                });
+                return result;
+            }
+        {
             ValidationDelegate pipeline = BuildPipeline(context);
             var pipelineResult = await pipeline(context);
             
@@ -59,6 +88,11 @@ public class ValidationPipeline
             result.IsPartialSuccess = result.FailedMiddleware.Any() && result.IsValid;
             
             return result;
+        }
+        finally
+        {
+            // Release resources
+            ReleaseResources(context);
         }
         catch (Exception ex)
         {
@@ -297,6 +331,174 @@ public class ValidationPipeline
         public int TotalFailures { get; set; }
         public int TotalSuccesses { get; set; }
         public TimeSpan LastSuccessfulDuration { get; set; }
+    }
+
+    private class ResourceSnapshot
+    {
+        public DateTime Timestamp { get; set; }
+        public ResourceMetrics Metrics { get; set; }
+    }
+
+    private class ResourceMetrics
+    {
+        public double CpuUsagePercent { get; set; }
+        public double MemoryUsageMB { get; set; }
+        public double DiskIoMBPS { get; set; }
+        public int ActiveThreads { get; set; }
+    }
+
+    private void StartResourceMonitoring()
+    {
+        Task.Run(async () =>
+        {
+            while (true)
+            {
+                EmitResourceMetrics();
+                UpdateResourceHistory();
+                AdjustThrottlingParameters();
+                await Task.Delay(TimeSpan.FromSeconds(1));
+            }
+        });
+    }
+
+    private async Task<bool> AcquireResourcesAsync(ValidationContext context)
+    {
+        if (!await _validationThrottle.WaitAsync(TimeSpan.FromSeconds(30)))
+        {
+            _logger.LogWarning("Failed to acquire validation slot - max concurrent validations reached");
+            return false;
+        }
+
+        if (_isThrottled && !context.IsCriticalValidation)
+        {
+            _validationThrottle.Release();
+            _logger.LogWarning("Validation rejected due to resource throttling");
+            return false;
+        }
+
+        var metrics = GetCurrentResourceMetrics();
+        if (ExceedsResourceThresholds(metrics) && !context.IsCriticalValidation)
+        {
+            _validationThrottle.Release();
+            _logger.LogWarning("Validation rejected due to resource constraints: CPU {CpuUsage}%, Memory {MemoryUsage}MB, IO {IoRate}MBPS",
+                metrics.CpuUsagePercent, metrics.MemoryUsageMB, metrics.DiskIoMBPS);
+            return false;
+        }
+
+        if (context.IsCriticalValidation)
+        {
+            _criticalValidationReservations.AddOrUpdate(context.Id, 1, (_, count) => count + 1);
+        }
+
+        return true;
+    }
+
+    private void ReleaseResources(ValidationContext context)
+    {
+        _validationThrottle.Release();
+        
+        if (context.IsCriticalValidation)
+        {
+            _criticalValidationReservations.AddOrUpdate(context.Id, 0, (_, count) => Math.Max(0, count - 1));
+        }
+    }
+
+    private bool ExceedsResourceThresholds(ResourceMetrics metrics)
+    {
+        return metrics.CpuUsagePercent > _config.MaxCpuThresholdPercent ||
+               metrics.MemoryUsageMB > _config.MaxMemoryThresholdMB ||
+               metrics.DiskIoMBPS > _config.MaxDiskIoMBPS;
+    }
+
+    private void UpdateResourceHistory()
+    {
+        var snapshot = new ResourceSnapshot
+        {
+            Timestamp = DateTime.UtcNow,
+            Metrics = GetCurrentResourceMetrics()
+        };
+
+        _resourceHistory.Enqueue(snapshot);
+
+        // Trim old entries
+        while (_resourceHistory.TryPeek(out var oldest) &&
+               (DateTime.UtcNow - oldest.Timestamp) > _config.ResourceTrendInterval)
+        {
+            _resourceHistory.TryDequeue(out _);
+        }
+    }
+
+    private void AdjustThrottlingParameters()
+    {
+        if (!_config.EnableAdaptiveThrottling ||
+            (DateTime.UtcNow - _lastThrottlingAdjustment) < TimeSpan.FromMinutes(1))
+        {
+            return;
+        }
+
+        var metrics = _resourceHistory.ToList();
+        if (metrics.Count < 2)
+        {
+            return;
+        }
+
+        var trend = CalculateResourceTrend(metrics);
+        var currentReservations = _criticalValidationReservations.Values.Sum();
+        var reservationLimit = (int)(_config.MaxConcurrentValidations * (_config.ResourceReservationPercent / 100.0));
+
+        if (trend > 0.1 && currentReservations < reservationLimit) // Resource usage trending up
+        {
+            var newLimit = Math.Max(1, (int)(_config.MaxConcurrentValidations * (1 - _config.ThrottlingAdjustmentFactor)));
+            _validationThrottle.Release(_validationThrottle.CurrentCount);
+            _validationThrottle = new SemaphoreSlim(newLimit);
+            _isThrottled = true;
+            _logger.LogInformation("Throttling increased - new concurrent limit: {Limit}", newLimit);
+        }
+        else if (trend < -0.1 && _isThrottled) // Resource usage trending down
+        {
+            var newLimit = Math.Min(_config.MaxConcurrentValidations,
+                (int)(_config.MaxConcurrentValidations * (1 + _config.ThrottlingAdjustmentFactor)));
+            _validationThrottle.Release(_validationThrottle.CurrentCount);
+            _validationThrottle = new SemaphoreSlim(newLimit);
+            _isThrottled = false;
+            _logger.LogInformation("Throttling decreased - new concurrent limit: {Limit}", newLimit);
+        }
+
+        _lastThrottlingAdjustment = DateTime.UtcNow;
+    }
+
+    private double CalculateResourceTrend(List<ResourceSnapshot> metrics)
+    {
+        // Simple linear regression on CPU usage as primary indicator
+        var n = metrics.Count;
+        var sumX = 0.0;
+        var sumY = 0.0;
+        var sumXY = 0.0;
+        var sumXX = 0.0;
+
+        for (var i = 0; i < n; i++)
+        {
+            var x = i;
+            var y = metrics[i].Metrics.CpuUsagePercent;
+            sumX += x;
+            sumY += y;
+            sumXY += x * y;
+            sumXX += x * x;
+        }
+
+        var slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+        return slope;
+    }
+
+    private ResourceMetrics GetCurrentResourceMetrics()
+    {
+        return new ResourceMetrics
+        {
+            CpuUsagePercent = GetCpuUsage(),
+            MemoryUsageMB = GetMemoryUsage(),
+            DiskIoMBPS = GetDiskIoRate(),
+            ActiveThreads = GetActiveThreadCount()
+        };
     }
 
     private void EmitResourceMetrics()
