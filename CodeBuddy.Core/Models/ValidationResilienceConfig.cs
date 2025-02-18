@@ -10,7 +10,7 @@ public class ValidationResilienceConfig
     public double MaxDiskIoMBPS { get; set; } = 100.0; // 100 MB/s
     public int MaxConcurrentValidations { get; set; } = 10;
 
-    // Memory Leak Detection Configuration
+    // Memory Analytics Configuration
     public TimeSpan MemoryAnalysisInterval { get; set; } = TimeSpan.FromMinutes(10);
     public double MemoryGrowthThresholdPercent { get; set; } = 5.0; // Threshold for leak detection
     public int LeakConfidenceThreshold { get; set; } = 90; // Confidence level (percentage)
@@ -19,6 +19,15 @@ public class ValidationResilienceConfig
     public double LohGrowthThresholdMB { get; set; } = 100.0; // Large Object Heap growth threshold
     public int MaxFinalizationQueueLength { get; set; } = 1000;
     public double MaxFragmentationPercent { get; set; } = 40.0;
+    
+    // Memory Analytics Dashboard Configuration
+    public bool EnableMemoryAnalyticsDashboard { get; set; } = true;
+    public TimeSpan MemoryMetricsRetentionPeriod { get; set; } = TimeSpan.FromDays(30);
+    public int MemoryMetricsSamplingInterval { get; set; } = 60; // Seconds
+    public bool EnableRealTimeMemoryMonitoring { get; set; } = true;
+    public int MaxMemoryGraphDataPoints { get; set; } = 1000;
+    public double AllocationHotspotThresholdMB { get; set; } = 50.0;
+    public bool EnableMemoryLeakAlerts { get; set; } = true;
     
     // Adaptive Throttling Configuration
     public TimeSpan ResourceTrendInterval { get; set; } = TimeSpan.FromMinutes(5);
