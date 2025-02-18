@@ -1,9 +1,13 @@
+using System;
+using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodeBuddy.Core.Interfaces;
 using CodeBuddy.Core.Models;
+using CodeBuddy.Core.Models.Configuration;
+using CodeBuddy.Core.Implementation.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace CodeBuddy.Core.Implementation;
@@ -18,19 +22,21 @@ public class ConfigurationManager : IConfigurationManager
     private readonly string _configPath;
     private readonly Dictionary<string, object> _cache = new();
     private readonly JsonSerializerOptions _jsonOptions;
-    private readonly Timer _healthCheckTimer;
+    private readonly System.Threading.Timer _healthCheckTimer;
     private readonly IConfigurationMigrationManager _migrationManager;
+    private readonly ConfigurationValidationManager _validationManager;
 
     public ConfigurationManager(
         IFileOperations fileOperations, 
         ILogger<ConfigurationManager> logger,
+        IServiceProvider serviceProvider,
         string configPath = "config.json")
     {
         _fileOperations = fileOperations;
         _logger = logger;
         _configPath = configPath;
-        _migrationManager = new ConfigurationMigrationManager(
-            loggerFactory.CreateLogger<ConfigurationMigrationManager>());
+        _migrationManager = new ConfigurationMigrationManager(logger);
+        _validationManager = new ConfigurationValidationManager(serviceProvider);
         
         _jsonOptions = new JsonSerializerOptions
         {
@@ -40,7 +46,7 @@ public class ConfigurationManager : IConfigurationManager
         };
 
         // Initialize health check timer (runs every 5 minutes)
-        _healthCheckTimer = new Timer(RunHealthCheck, null, TimeSpan.Zero, TimeSpan.FromMinutes(5));
+        _healthCheckTimer = new System.Threading.Timer(RunHealthCheck, null, TimeSpan.Zero, TimeSpan.FromMinutes(5));
     }
 
     /// <summary>
@@ -51,6 +57,9 @@ public class ConfigurationManager : IConfigurationManager
         try
         {
             _logger.LogDebug("Getting configuration for section {Section}", section);
+
+            // Register configuration type
+            _validationManager.RegisterConfiguration<T>();
 
             // Check cache first
             if (_cache.TryGetValue(section, out var cached))
@@ -89,14 +98,21 @@ public class ConfigurationManager : IConfigurationManager
                 }
             }
             
-            // Validate configuration
-            var validationResults = ValidateConfiguration(config);
-            var warnings = validationResults.Where(r => !r.ErrorMessage?.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase) == true);
-            if (warnings.Any())
+            // Validate configuration using the validation framework
+            var validationResult = await _validationManager.ValidateAsync(config);
+            if (!validationResult.IsValid)
             {
-                var warningMessages = string.Join(Environment.NewLine, warnings.Select(r => r.ErrorMessage));
-                _logger.LogWarning("Configuration validation warnings for section {Section}:{NewLine}{Warnings}", 
-                    section, Environment.NewLine, warningMessages);
+                if (validationResult.Severity == ValidationSeverity.Error)
+                {
+                    throw new ValidationException($"Configuration validation failed:{Environment.NewLine}{string.Join(Environment.NewLine, validationResult.Errors)}");
+                }
+                else
+                {
+                    foreach (var warning in validationResult.Errors)
+                    {
+                        _logger.LogWarning("Configuration warning for section {Section}: {Warning}", section, warning);
+                    }
+                }
             }
 
             // Cache and return
@@ -119,20 +135,20 @@ public class ConfigurationManager : IConfigurationManager
         {
             _logger.LogInformation("Saving configuration for section {Section}", section);
 
-            // Validate configuration
-            var validationResults = ValidateConfiguration(configuration);
-            if (validationResults.Any(r => r.ErrorMessage?.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase) == true))
+            // Register configuration type
+            _validationManager.RegisterConfiguration<T>();
+
+            // Validate configuration using the validation framework
+            var validationResult = await _validationManager.ValidateAsync(configuration);
+            if (!validationResult.IsValid && validationResult.Severity == ValidationSeverity.Error)
             {
-                var errors = string.Join(Environment.NewLine, validationResults
-                    .Where(r => r.ErrorMessage?.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase) == true)
-                    .Select(r => r.ErrorMessage));
-                
-                throw new ValidationException($"Configuration validation failed:{Environment.NewLine}{errors}");
+                throw new ValidationException(
+                    $"Configuration validation failed:{Environment.NewLine}{string.Join(Environment.NewLine, validationResult.Errors)}");
             }
 
             // Load existing config
             var configJson = File.Exists(_configPath) 
-                ? File.ReadAllText(_configPath) 
+                ? await File.ReadAllTextAsync(_configPath)
                 : "{}";
 
             var config = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(configJson, _jsonOptions) 
@@ -175,10 +191,13 @@ public class ConfigurationManager : IConfigurationManager
             _cache[section] = configuration;
             RunHealthCheck(null);
 
-            // Log any warnings
-            foreach (var warning in validationResults.Where(r => !r.ErrorMessage?.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase) == true))
+            // Log any warnings from validation
+            if (!validationResult.IsValid && validationResult.Severity == ValidationSeverity.Warning)
             {
-                _logger.LogWarning("Configuration warning: {Message}", warning.ErrorMessage);
+                foreach (var warning in validationResult.Errors)
+                {
+                    _logger.LogWarning("Configuration warning: {Message}", warning);
+                }
             }
         }
         catch (Exception ex)
@@ -189,35 +208,9 @@ public class ConfigurationManager : IConfigurationManager
     }
 
     /// <summary>
-    /// Validates configuration and returns detailed validation results
-    /// </summary>
-    public IEnumerable<ValidationResult> ValidateConfiguration<T>(T configuration) where T : class
-    {
-        if (configuration == null)
-        {
-            return new[] { new ValidationResult("ERROR: Configuration cannot be null") };
-        }
-
-        var results = new List<ValidationResult>();
-        var context = new ValidationContext(configuration);
-
-        // Perform validation
-        Validator.TryValidateObject(configuration, context, results, true);
-
-        // Add schema version validation
-        var schemaResults = ValidateSchemaVersion<T>();
-        if (schemaResults != null)
-        {
-            results.Add(schemaResults);
-        }
-
-        return results;
-    }
-
-    /// <summary>
     /// Performs health check on all configuration sections
     /// </summary>
-    private void RunHealthCheck(object? state)
+    private async void RunHealthCheck(object? state)
     {
         try
         {
@@ -225,20 +218,12 @@ public class ConfigurationManager : IConfigurationManager
 
             foreach (var (section, config) in _cache)
             {
-                var results = ValidateConfiguration(config);
-                var errors = results.Where(r => r.ErrorMessage?.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase) == true);
-                var warnings = results.Where(r => !r.ErrorMessage?.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase) == true);
-
-                if (errors.Any())
+                var validationResult = await _validationManager.ValidateAsync(config);
+                if (!validationResult.IsValid)
                 {
-                    _logger.LogError("Configuration health check failed for section {Section}:{NewLine}{Errors}", 
-                        section, Environment.NewLine, string.Join(Environment.NewLine, errors.Select(e => e.ErrorMessage)));
-                }
-
-                if (warnings.Any())
-                {
-                    _logger.LogWarning("Configuration health check warnings for section {Section}:{NewLine}{Warnings}", 
-                        section, Environment.NewLine, string.Join(Environment.NewLine, warnings.Select(w => w.ErrorMessage)));
+                    var severity = validationResult.Severity == ValidationSeverity.Error ? "ERROR" : "WARNING";
+                    _logger.LogWarning("Configuration health check {Severity} for section {Section}:{NewLine}{Errors}", 
+                        severity, section, Environment.NewLine, string.Join(Environment.NewLine, validationResult.Errors));
                 }
             }
         }
@@ -323,8 +308,8 @@ public class ConfigurationManager : IConfigurationManager
     private static string GetSchemaVersion<T>() where T : class
     {
         var type = typeof(T);
-        var schemaVersion = type.GetCustomAttribute<SchemaVersionAttribute>()?.Version ?? "1.0";
-        return schemaVersion;
+        var configSection = type.GetCustomAttribute<ConfigurationSectionAttribute>();
+        return configSection?.Version.ToString() ?? "1.0";
     }
 
     /// <summary>
@@ -358,7 +343,7 @@ public class ConfigurationManager : IConfigurationManager
     private ValidationResult? ValidateSchemaVersion<T>() where T : class
     {
         var configVersion = GetSchemaVersion<T>();
-        var currentVersion = typeof(T).GetCustomAttribute<SchemaVersionAttribute>()?.Version;
+        var currentVersion = typeof(T).GetCustomAttribute<ConfigurationSectionAttribute>()?.Version.ToString();
 
         if (currentVersion != null && Version.Parse(configVersion) < Version.Parse(currentVersion))
         {
@@ -366,30 +351,5 @@ public class ConfigurationManager : IConfigurationManager
         }
 
         return null;
-    }
-}
-
-/// <summary>
-/// Defines the schema version for a configuration class
-/// </summary>
-[AttributeUsage(AttributeTargets.Class)]
-public class SchemaVersionAttribute : Attribute
-{
-    public string Version { get; }
-
-    public SchemaVersionAttribute(string version)
-    {
-        Version = version;
-    }
-}
-
-/// <summary>
-/// Exception thrown for configuration-related errors
-/// </summary>
-public class ConfigurationException : Exception
-{
-    public ConfigurationException(string message, Exception? innerException = null) 
-        : base(message, innerException)
-    {
     }
 }
