@@ -1,75 +1,110 @@
 using System;
+using System.ComponentModel.DataAnnotations;
 
 namespace CodeBuddy.Core.Models.Configuration
 {
-    [AttributeUsage(AttributeTargets.Class)]
-    public class ConfigurationSectionAttribute : Attribute
+    /// <summary>
+    /// Marks a configuration property as sensitive, indicating it should be stored securely
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property)]
+    public class SensitiveDataAttribute : ValidationAttribute
     {
-        public string SectionName { get; }
-        public string Description { get; }
-        public int Version { get; }
-
-        public ConfigurationSectionAttribute(string sectionName, string description, int version = 1)
+        public override bool IsValid(object value)
         {
-            SectionName = sectionName;
-            Description = description;
-            Version = version;
+            return true; // Just marks for secure storage, doesn't validate
         }
     }
 
+    /// <summary>
+    /// Indicates a property requires specific environment variables to be set
+    /// </summary>
     [AttributeUsage(AttributeTargets.Property)]
-    public class ConfigurationItemAttribute : Attribute
+    public class RequiresEnvironmentAttribute : ValidationAttribute
     {
-        public string Description { get; }
-        public bool Required { get; }
-        public string DefaultValue { get; }
+        private readonly string[] _requiredVars;
 
-        public ConfigurationItemAttribute(string description, bool required = true, string defaultValue = null)
+        public RequiresEnvironmentAttribute(params string[] envVars)
         {
-            Description = description;
-            Required = required;
-            DefaultValue = defaultValue;
+            _requiredVars = envVars;
         }
-    }
 
-    [AttributeUsage(AttributeTargets.Property)]
-    public class RangeValidationAttribute : Attribute
-    {
-        public object Minimum { get; }
-        public object Maximum { get; }
-
-        public RangeValidationAttribute(object minimum, object maximum)
+        public override bool IsValid(object value)
         {
-            Minimum = minimum;
-            Maximum = maximum;
-        }
-    }
-
-    [AttributeUsage(AttributeTargets.Property)]
-    public class PatternValidationAttribute : Attribute
-    {
-        public string RegexPattern { get; }
-        public string ErrorMessage { get; }
-
-        public PatternValidationAttribute(string regexPattern, string errorMessage)
-        {
-            RegexPattern = regexPattern;
-            ErrorMessage = errorMessage;
-        }
-    }
-
-    [AttributeUsage(AttributeTargets.Property)]
-    public class CustomValidationAttribute : Attribute
-    {
-        public Type ValidatorType { get; }
-
-        public CustomValidationAttribute(Type validatorType)
-        {
-            if (!typeof(IConfigurationValidator).IsAssignableFrom(validatorType))
+            foreach (var env in _requiredVars)
             {
-                throw new ArgumentException("Validator type must implement IConfigurationValidator");
+                if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable(env)))
+                {
+                    ErrorMessage = $"Environment variable {env} is required but not set";
+                    return false;
+                }
             }
-            ValidatorType = validatorType;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Validates a configuration value against command line arguments
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property)]
+    public class CommandLineOverrideAttribute : ValidationAttribute
+    {
+        public string ArgumentName { get; }
+        public bool Required { get; }
+
+        public CommandLineOverrideAttribute(string argumentName, bool required = false)
+        {
+            ArgumentName = argumentName;
+            Required = required;
+        }
+    }
+
+    /// <summary>
+    /// Indicates configuration values that should be reloaded when changed
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property)]
+    public class ReloadableAttribute : Attribute
+    {
+        public int PollInterval { get; }
+
+        public ReloadableAttribute(int pollIntervalSeconds = 30)
+        {
+            PollInterval = pollIntervalSeconds;
+        }
+    }
+
+    /// <summary>
+    /// Specifies valid configuration value ranges
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property)]
+    public class ConfigurationRangeAttribute : RangeAttribute
+    {
+        public ConfigurationRangeAttribute(double minimum, double maximum) 
+            : base(minimum, maximum)
+        {
+        }
+
+        public ConfigurationRangeAttribute(int minimum, int maximum) 
+            : base(minimum, maximum)
+        {
+        }
+
+        public ConfigurationRangeAttribute(Type type, string minimum, string maximum) 
+            : base(type, minimum, maximum)
+        {
+        }
+    }
+
+    /// <summary>
+    /// Marks configuration values that are environment-specific
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property)]
+    public class EnvironmentSpecificAttribute : Attribute
+    {
+        public string[] Environments { get; }
+
+        public EnvironmentSpecificAttribute(params string[] environments)
+        {
+            Environments = environments;
         }
     }
 }
