@@ -1,98 +1,134 @@
 using System;
 using System.Collections.Generic;
-using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Hosting;
-using CodeBuddy.Core.Implementation.Logging;
-using CodeBuddy.Core.Models.Exceptions;
-using CodeBuddy.Core.Models.Logging;
+using System.Linq;
+using CodeBuddy.Core.Models.ResourceManagement;
+using CodeBuddy.Core.Implementation.CodeValidation.Monitoring;
+using CodeBuddy.Core.Implementation.CodeValidation.Logging;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation.ResourceManagement
 {
-    public class ResourceCleanupService : BackgroundService
+    public class ResourceCleanupService
     {
-        private readonly ResourceReleaseMonitor _resourceMonitor;
-        private readonly ResourceLogger _logger;
-        private readonly TimeSpan _checkInterval = TimeSpan.FromMinutes(5);
+        private readonly MemoryLeakPreventionSystem _memoryLeakPrevention;
+        private readonly IResourceLoggingService _loggingService;
+        private readonly ResourceReleaseMonitor _releaseMonitor;
 
         public ResourceCleanupService(
-            ResourceReleaseMonitor resourceMonitor,
-            ResourceLogger logger)
+            MemoryLeakPreventionSystem memoryLeakPrevention,
+            ResourceReleaseMonitor releaseMonitor,
+            IResourceLoggingService loggingService)
         {
-            _resourceMonitor = resourceMonitor;
-            _logger = logger;
+            _memoryLeakPrevention = memoryLeakPrevention ?? throw new ArgumentNullException(nameof(memoryLeakPrevention));
+            _releaseMonitor = releaseMonitor ?? throw new ArgumentNullException(nameof(releaseMonitor));
+            _loggingService = loggingService ?? throw new ArgumentNullException(nameof(loggingService));
         }
 
-        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        public async Task CleanupResources(IEnumerable<ResourceInfo> resources)
         {
-            while (!stoppingToken.IsCancellationRequested)
+            var startTime = DateTime.UtcNow;
+            var metrics = new Dictionary<string, object>
+            {
+                { "ResourceCount", resources.Count() },
+                { "CleanupStartTime", startTime }
+            };
+
+            _loggingService.LogResourceAllocation(
+                "ResourceCleanup",
+                "CleanupStart",
+                metrics,
+                nameof(ResourceCleanupService));
+
+            var successCount = 0;
+            var failureCount = 0;
+
+            foreach (var resource in resources)
             {
                 try
                 {
-                    _logger.Log(LogLevel.Information, "ResourceCleanup", "StartCleanup", 
-                        "Starting resource cleanup cycle");
-
-                    var cleanupResult = await _resourceMonitor.ProcessStuckAllocations();
+                    await ReleaseResource(resource);
+                    successCount++;
                     
-                    _logger.Log(LogLevel.Information, "ResourceCleanup", "CleanupComplete", 
-                        $"Completed resource cleanup cycle", 
+                    _loggingService.LogResourceDeallocation(
+                        resource.ResourceType.ToString(),
+                        "ResourceRelease",
                         new Dictionary<string, object>
                         {
-                            { "ResourcesProcessed", cleanupResult.ProcessedCount },
-                            { "ResourcesFreed", cleanupResult.FreedCount },
-                            { "TotalMemoryReclaimed", cleanupResult.ReclaimedMemoryBytes }
-                        });
-                }
-                catch (ResourceAllocationException ex)
-                {
-                    _logger.Log(LogLevel.Error, "ResourceCleanup", "AllocationError", 
-                        $"Resource allocation error during cleanup: {ex.Message}");
-                    await HandleCleanupError(ex);
-                }
-                catch (ResourceCleanupException ex)
-                {
-                    _logger.Log(LogLevel.Error, "ResourceCleanup", "CleanupError", 
-                        $"Resource cleanup error: {ex.Message}");
-                    await HandleCleanupError(ex);
+                            { "ResourceId", resource.Id },
+                            { "ReleaseTime", DateTime.UtcNow },
+                            { "ResourceAge", DateTime.UtcNow - resource.CreationTime },
+                            { "ResourceType", resource.ResourceType },
+                            { "ReleaseSuccess", true }
+                        },
+                        nameof(ResourceCleanupService));
                 }
                 catch (Exception ex)
                 {
-                    _logger.Log(LogLevel.Critical, "ResourceCleanup", "UnexpectedError", 
-                        $"Unexpected error during resource cleanup: {ex.Message}",
-                        new Dictionary<string, object>
-                        {
-                            { "ExceptionType", ex.GetType().Name },
-                            { "StackTrace", ex.StackTrace }
-                        });
-                    await HandleCleanupError(ex);
+                    failureCount++;
+                    _loggingService.LogResourceError(
+                        resource.ResourceType.ToString(),
+                        $"Failed to release resource {resource.Id}",
+                        ex,
+                        nameof(ResourceCleanupService));
                 }
-
-                await Task.Delay(_checkInterval, stoppingToken);
             }
+
+            var leakCheckResult = await _memoryLeakPrevention.CheckForLeaks();
+            var completionTime = DateTime.UtcNow;
+            
+            _loggingService.LogResourceAllocation(
+                "ResourceCleanup",
+                "CleanupComplete",
+                new Dictionary<string, object>
+                {
+                    { "ResourceCount", resources.Count() },
+                    { "SuccessCount", successCount },
+                    { "FailureCount", failureCount },
+                    { "CompletionTime", completionTime },
+                    { "TotalDuration", completionTime - startTime },
+                    { "LeaksDetected", leakCheckResult.LeaksDetected },
+                    { "MemoryReclaimed", leakCheckResult.ReclaimedBytes }
+                },
+                nameof(ResourceCleanupService));
+
+            await _releaseMonitor.UpdateReleaseMetrics(new ReleaseMetrics
+            {
+                TotalResources = resources.Count(),
+                SuccessfulReleases = successCount,
+                FailedReleases = failureCount,
+                LeaksDetected = leakCheckResult.LeaksDetected,
+                MemoryReclaimed = leakCheckResult.ReclaimedBytes,
+                ExecutionTime = completionTime - startTime
+            });
         }
 
-        private async Task HandleCleanupError(Exception ex)
+        private async Task ReleaseResource(ResourceInfo resource)
         {
-            // Implement recovery strategy
+            var releaseStart = DateTime.UtcNow;
             try
             {
-                _logger.Log(LogLevel.Information, "ResourceCleanup", "ErrorRecovery", 
-                    "Attempting to recover from cleanup error");
-                
-                await _resourceMonitor.ForceReleaseResources();
-                
-                _logger.Log(LogLevel.Information, "ResourceCleanup", "RecoveryComplete", 
-                    "Successfully recovered from cleanup error");
-            }
-            catch (Exception recoveryEx)
-            {
-                _logger.Log(LogLevel.Critical, "ResourceCleanup", "RecoveryFailed", 
-                    $"Failed to recover from cleanup error: {recoveryEx.Message}",
+                await _releaseMonitor.BeginResourceRelease(resource);
+                await resource.Release();
+                await _releaseMonitor.CompleteResourceRelease(resource);
+
+                _loggingService.LogResourceAllocation(
+                    resource.ResourceType.ToString(),
+                    "ResourceReleaseDetails",
                     new Dictionary<string, object>
                     {
-                        { "OriginalError", ex.Message },
-                        { "RecoveryError", recoveryEx.Message }
-                    });
+                        { "ResourceId", resource.Id },
+                        { "ReleaseTime", DateTime.UtcNow },
+                        { "ReleaseDuration", DateTime.UtcNow - releaseStart },
+                        { "ResourceType", resource.ResourceType },
+                        { "ReleaseSuccess", true },
+                        { "MemoryFreed", resource.MemoryUsage }
+                    },
+                    nameof(ResourceCleanupService));
+            }
+            catch (Exception ex)
+            {
+                await _releaseMonitor.FailResourceRelease(resource, ex);
+                throw;
             }
         }
     }

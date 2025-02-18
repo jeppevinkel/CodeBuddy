@@ -1,289 +1,163 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
+using CodeBuddy.Core.Implementation.CodeValidation.Logging;
 using CodeBuddy.Core.Models.Analytics;
-using Microsoft.Extensions.Logging;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation.Monitoring
 {
-    public class ResourceMonitoringDashboard : IAsyncDisposable
+    public class ResourceMonitoringDashboard
     {
-        private readonly ILogger _logger;
-        private readonly ConcurrentQueue<ResourceMetricsModel> _metricsHistory;
-        private readonly ConcurrentDictionary<string, ResourceAlert> _activeAlerts;
-        private readonly ResourceThresholds _thresholds;
-        private readonly Timer _monitoringTimer;
-        private readonly int _maxHistoryItems = 1000;
-        private readonly TimeSpan _monitoringInterval = TimeSpan.FromSeconds(1);
-        private bool _disposed;
+        private readonly IResourceLoggingService _loggingService;
+        private readonly IResourceLogAggregator _logAggregator;
+        private readonly Dictionary<string, Dictionary<string, object>> _resourceMetrics;
+        private readonly object _metricsLock = new object();
 
-        public ResourceMonitoringDashboard(ILogger logger, ResourceThresholds thresholds = null)
+        public ResourceMonitoringDashboard(
+            IResourceLoggingService loggingService,
+            IResourceLogAggregator logAggregator)
         {
-            _logger = logger;
-            _metricsHistory = new ConcurrentQueue<ResourceMetricsModel>();
-            _activeAlerts = new ConcurrentDictionary<string, ResourceAlert>();
-            _thresholds = thresholds ?? new ResourceThresholds();
-            _monitoringTimer = new Timer(MonitorResources, null, _monitoringInterval, _monitoringInterval);
+            _loggingService = loggingService ?? throw new ArgumentNullException(nameof(loggingService));
+            _logAggregator = logAggregator ?? throw new ArgumentNullException(nameof(logAggregator));
+            _resourceMetrics = new Dictionary<string, Dictionary<string, object>>();
         }
 
-        public async Task<ResourceMetricsModel> GetCurrentMetricsAsync()
+        public async Task UpdateResourceMetrics(string resourceId, Dictionary<string, object> metrics)
         {
-            var process = Process.GetCurrentProcess();
-            var metrics = new ResourceMetricsModel
+            lock (_metricsLock)
             {
-                Timestamp = DateTime.UtcNow,
-                MemoryUsageBytes = process.WorkingSet64,
-                CpuUsagePercent = await GetCpuUsageAsync(),
-                ActiveHandles = process.HandleCount,
-                HealthStatus = CalculateHealthStatus()
-            };
-
-            // Add to history and trim if needed
-            _metricsHistory.Enqueue(metrics);
-            while (_metricsHistory.Count > _maxHistoryItems)
-            {
-                _metricsHistory.TryDequeue(out _);
-            }
-
-            CheckThresholds(metrics);
-            return metrics;
-        }
-
-        public ResourceTrendData GetTrendData(TimeSpan timeSpan)
-        {
-            var cutoffTime = DateTime.UtcNow - timeSpan;
-            var relevantMetrics = _metricsHistory
-                .Where(m => m.Timestamp >= cutoffTime)
-                .OrderBy(m => m.Timestamp)
-                .ToList();
-
-            return new ResourceTrendData
-            {
-                StartTime = cutoffTime,
-                EndTime = DateTime.UtcNow,
-                Metrics = relevantMetrics,
-                AverageUtilization = CalculateAverageUtilization(relevantMetrics),
-                PeakUtilization = CalculatePeakUtilization(relevantMetrics),
-                Alerts = _activeAlerts.Values.ToList()
-            };
-        }
-
-        public IEnumerable<ResourceAlert> GetActiveAlerts()
-        {
-            return _activeAlerts.Values;
-        }
-
-        private async Task<double> GetCpuUsageAsync()
-        {
-            var startTime = DateTime.UtcNow;
-            var startCpuUsage = Process.GetCurrentProcess().TotalProcessorTime;
-            
-            await Task.Delay(100); // Sample over 100ms
-            
-            var endTime = DateTime.UtcNow;
-            var endCpuUsage = Process.GetCurrentProcess().TotalProcessorTime;
-            
-            var cpuUsedMs = (endCpuUsage - startCpuUsage).TotalMilliseconds;
-            var totalMsPassed = (endTime - startTime).TotalMilliseconds;
-            
-            var cpuUsageTotal = cpuUsedMs / (Environment.ProcessorCount * totalMsPassed) * 100;
-            return Math.Min(100, cpuUsageTotal); // Cap at 100%
-        }
-
-        private void MonitorResources(object state)
-        {
-            if (_disposed) return;
-
-            try
-            {
-                var _ = GetCurrentMetricsAsync().ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error monitoring resources");
-            }
-        }
-
-        private void CheckThresholds(ResourceMetricsModel metrics)
-        {
-            CheckMemoryThreshold(metrics);
-            CheckCpuThreshold(metrics);
-            CheckHandleThreshold(metrics);
-            CheckQueueSaturation(metrics);
-        }
-
-        private void CheckMemoryThreshold(ResourceMetricsModel metrics)
-        {
-            if (metrics.MemoryUsageBytes >= _thresholds.MemoryCriticalThresholdBytes)
-            {
-                RaiseAlert("MEM001", "Memory", "Critical", 
-                    "Memory usage exceeds critical threshold",
-                    new Dictionary<string, double>
-                    {
-                        ["CurrentUsageMB"] = metrics.MemoryUsageBytes / (1024.0 * 1024.0),
-                        ["ThresholdMB"] = _thresholds.MemoryCriticalThresholdBytes / (1024.0 * 1024.0)
-                    });
-            }
-            else if (metrics.MemoryUsageBytes >= _thresholds.MemoryWarningThresholdBytes)
-            {
-                RaiseAlert("MEM002", "Memory", "Warning",
-                    "Memory usage exceeds warning threshold",
-                    new Dictionary<string, double>
-                    {
-                        ["CurrentUsageMB"] = metrics.MemoryUsageBytes / (1024.0 * 1024.0),
-                        ["ThresholdMB"] = _thresholds.MemoryWarningThresholdBytes / (1024.0 * 1024.0)
-                    });
-            }
-            else
-            {
-                ClearAlert("MEM001");
-                ClearAlert("MEM002");
-            }
-        }
-
-        private void CheckCpuThreshold(ResourceMetricsModel metrics)
-        {
-            if (metrics.CpuUsagePercent >= _thresholds.CpuCriticalThresholdPercent)
-            {
-                RaiseAlert("CPU001", "CPU", "Critical",
-                    "CPU usage exceeds critical threshold",
-                    new Dictionary<string, double>
-                    {
-                        ["CurrentUsage"] = metrics.CpuUsagePercent,
-                        ["Threshold"] = _thresholds.CpuCriticalThresholdPercent
-                    });
-            }
-            else if (metrics.CpuUsagePercent >= _thresholds.CpuWarningThresholdPercent)
-            {
-                RaiseAlert("CPU002", "CPU", "Warning",
-                    "CPU usage exceeds warning threshold",
-                    new Dictionary<string, double>
-                    {
-                        ["CurrentUsage"] = metrics.CpuUsagePercent,
-                        ["Threshold"] = _thresholds.CpuWarningThresholdPercent
-                    });
-            }
-            else
-            {
-                ClearAlert("CPU001");
-                ClearAlert("CPU002");
-            }
-        }
-
-        private void CheckHandleThreshold(ResourceMetricsModel metrics)
-        {
-            if (metrics.ActiveHandles > _thresholds.MaxHandleCount)
-            {
-                RaiseAlert("HDL001", "Handles", "Warning",
-                    "Handle count exceeds threshold",
-                    new Dictionary<string, double>
-                    {
-                        ["CurrentHandles"] = metrics.ActiveHandles,
-                        ["Threshold"] = _thresholds.MaxHandleCount
-                    });
-            }
-            else
-            {
-                ClearAlert("HDL001");
-            }
-        }
-
-        private void CheckQueueSaturation(ResourceMetricsModel metrics)
-        {
-            if (metrics.ValidationQueueMetrics.TryGetValue("QueueUtilization", out var utilization))
-            {
-                if (utilization > _thresholds.QueueSaturationThreshold)
+                if (!_resourceMetrics.ContainsKey(resourceId))
                 {
-                    RaiseAlert("QUE001", "Queue", "Warning",
-                        "Validation queue approaching saturation",
-                        new Dictionary<string, double>
-                        {
-                            ["CurrentUtilization"] = utilization,
-                            ["Threshold"] = _thresholds.QueueSaturationThreshold
-                        });
+                    _resourceMetrics[resourceId] = new Dictionary<string, object>();
                 }
-                else
+
+                foreach (var metric in metrics)
                 {
-                    ClearAlert("QUE001");
+                    _resourceMetrics[resourceId][metric.Key] = metric.Value;
                 }
             }
+
+            _loggingService.LogResourceAllocation(
+                resourceId,
+                "MetricsUpdate",
+                metrics,
+                nameof(ResourceMonitoringDashboard));
         }
 
-        private void RaiseAlert(string alertId, string resourceType, string severity, string message,
-            Dictionary<string, double> metrics)
+        public async Task UpdateResourceOperation(string resourceId, string operation, Dictionary<string, object> details)
         {
-            var alert = new ResourceAlert
+            var metrics = new Dictionary<string, object>(details)
             {
-                AlertId = alertId,
-                ResourceType = resourceType,
-                Severity = severity,
-                Message = message,
-                Timestamp = DateTime.UtcNow,
-                CurrentValues = metrics
+                { "Operation", operation },
+                { "Timestamp", DateTime.UtcNow }
             };
 
-            _activeAlerts.AddOrUpdate(alertId, alert, (_, __) => alert);
-            _logger.LogWarning("Resource Alert: {AlertId} - {Message}", alertId, message);
+            _loggingService.LogResourceAllocation(
+                resourceId,
+                operation,
+                metrics,
+                nameof(ResourceMonitoringDashboard));
+
+            await UpdateResourceMetrics(resourceId, metrics);
         }
 
-        private void ClearAlert(string alertId)
+        public async Task UpdateHistoricalUsage(string resourceId, Dictionary<string, object> usageData)
         {
-            if (_activeAlerts.TryRemove(alertId, out var alert))
+            _loggingService.LogResourceAllocation(
+                resourceId,
+                "HistoricalUsageUpdate",
+                usageData,
+                nameof(ResourceMonitoringDashboard));
+
+            await UpdateResourceMetrics(resourceId, usageData);
+        }
+
+        public async Task UpdateResourceTrends(string resourceId, Dictionary<string, object> trends)
+        {
+            _loggingService.LogResourceAllocation(
+                resourceId,
+                "TrendUpdate",
+                trends,
+                nameof(ResourceMonitoringDashboard));
+
+            await UpdateResourceMetrics(resourceId, trends);
+        }
+
+        public async Task AddResourceAlert(string resourceId, Dictionary<string, object> alertInfo)
+        {
+            _loggingService.LogResourceWarning(
+                resourceId,
+                alertInfo["Message"].ToString(),
+                alertInfo,
+                nameof(ResourceMonitoringDashboard));
+
+            await UpdateResourceMetrics(resourceId, alertInfo);
+        }
+
+        public async Task UpdateLeakDetectionMetrics(Dictionary<string, object> metrics)
+        {
+            _loggingService.LogResourceAllocation(
+                "LeakDetection",
+                "MetricsUpdate",
+                metrics,
+                nameof(ResourceMonitoringDashboard));
+
+            await UpdateResourceMetrics("LeakDetection", metrics);
+        }
+
+        public async Task UpdateEmergencyCleanupMetrics(Dictionary<string, object> metrics)
+        {
+            _loggingService.LogResourceAllocation(
+                "EmergencyCleanup",
+                "MetricsUpdate",
+                metrics,
+                nameof(ResourceMonitoringDashboard));
+
+            await UpdateResourceMetrics("EmergencyCleanup", metrics);
+        }
+
+        public async Task UpdateMetrics(Dictionary<string, object> metrics)
+        {
+            _loggingService.LogResourceAllocation(
+                "Dashboard",
+                "MetricsUpdate",
+                metrics,
+                nameof(ResourceMonitoringDashboard));
+
+            await UpdateResourceMetrics("General", metrics);
+        }
+
+        public async Task RefreshDisplay()
+        {
+            var report = await _logAggregator.GenerateHealthReport();
+            
+            foreach (var metric in report.ResourceMetrics)
             {
-                _logger.LogInformation("Resource Alert Cleared: {AlertId}", alertId);
+                await UpdateResourceMetrics(metric.Key, new Dictionary<string, object>
+                {
+                    { "HealthScore", metric.Value.HealthScore },
+                    { "CurrentAllocationCount", metric.Value.CurrentAllocationCount },
+                    { "ErrorCount", metric.Value.ErrorCount },
+                    { "WarningCount", metric.Value.WarningCount }
+                });
+            }
+
+            foreach (var trend in report.Trends)
+            {
+                await UpdateResourceTrends(trend.ResourceName, trend.TrendMetrics);
+            }
+
+            foreach (var alert in report.Alerts)
+            {
+                await AddResourceAlert(alert.ResourceName, alert.Context);
             }
         }
 
-        private string CalculateHealthStatus()
+        public Dictionary<string, Dictionary<string, object>> GetCurrentMetrics()
         {
-            if (_activeAlerts.Values.Any(a => a.Severity == "Critical"))
-                return "Critical";
-            if (_activeAlerts.Values.Any(a => a.Severity == "Warning"))
-                return "Warning";
-            return "Healthy";
-        }
-
-        private Dictionary<string, double> CalculateAverageUtilization(List<ResourceMetricsModel> metrics)
-        {
-            if (!metrics.Any()) return new Dictionary<string, double>();
-
-            return new Dictionary<string, double>
+            lock (_metricsLock)
             {
-                ["MemoryMB"] = metrics.Average(m => m.MemoryUsageBytes) / (1024.0 * 1024.0),
-                ["CpuPercent"] = metrics.Average(m => m.CpuUsagePercent),
-                ["Handles"] = metrics.Average(m => m.ActiveHandles)
-            };
-        }
-
-        private Dictionary<string, double> CalculatePeakUtilization(List<ResourceMetricsModel> metrics)
-        {
-            if (!metrics.Any()) return new Dictionary<string, double>();
-
-            return new Dictionary<string, double>
-            {
-                ["MemoryMB"] = metrics.Max(m => m.MemoryUsageBytes) / (1024.0 * 1024.0),
-                ["CpuPercent"] = metrics.Max(m => m.CpuUsagePercent),
-                ["Handles"] = metrics.Max(m => m.ActiveHandles)
-            };
-        }
-
-        public async ValueTask DisposeAsync()
-        {
-            if (_disposed) return;
-
-            try
-            {
-                await _monitoringTimer.DisposeAsync();
-                _metricsHistory.Clear();
-                _activeAlerts.Clear();
-            }
-            finally
-            {
-                _disposed = true;
+                return new Dictionary<string, Dictionary<string, object>>(_resourceMetrics);
             }
         }
     }

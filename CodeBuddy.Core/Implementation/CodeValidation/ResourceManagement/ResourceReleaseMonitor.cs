@@ -1,153 +1,164 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading.Tasks;
-using CodeBuddy.Core.Implementation.Logging;
-using CodeBuddy.Core.Models.Exceptions;
-using CodeBuddy.Core.Models.Logging;
+using CodeBuddy.Core.Models.ResourceManagement;
+using CodeBuddy.Core.Implementation.CodeValidation.Logging;
+using CodeBuddy.Core.Implementation.CodeValidation.Monitoring;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation.ResourceManagement
 {
-    public class CleanupResult
-    {
-        public int ProcessedCount { get; set; }
-        public int FreedCount { get; set; }
-        public long ReclaimedMemoryBytes { get; set; }
-    }
-
     public class ResourceReleaseMonitor
     {
-        private readonly ResourceLogger _logger;
-        private readonly object _syncLock = new object();
-        private readonly Dictionary<string, int> _failureCounters = new Dictionary<string, int>();
-        private const int MaxFailureRetries = 3;
+        private readonly IResourceLoggingService _loggingService;
+        private readonly ResourceMonitoringDashboard _dashboard;
+        private readonly ConcurrentDictionary<string, ResourceReleaseOperation> _activeOperations;
 
-        public ResourceReleaseMonitor(ResourceLogger logger)
+        public ResourceReleaseMonitor(
+            IResourceLoggingService loggingService,
+            ResourceMonitoringDashboard dashboard)
         {
-            _logger = logger;
+            _loggingService = loggingService ?? throw new ArgumentNullException(nameof(loggingService));
+            _dashboard = dashboard ?? throw new ArgumentNullException(nameof(dashboard));
+            _activeOperations = new ConcurrentDictionary<string, ResourceReleaseOperation>();
         }
 
-        public async Task<CleanupResult> ProcessStuckAllocations()
+        public async Task BeginResourceRelease(ResourceInfo resource)
         {
-            var result = new CleanupResult();
-
-            try
+            var operation = new ResourceReleaseOperation
             {
-                _logger.Log(LogLevel.Debug, "ResourceMonitor", "ScanStart", 
-                    "Starting scan for stuck allocations");
+                ResourceId = resource.Id,
+                ResourceType = resource.ResourceType,
+                StartTime = DateTime.UtcNow,
+                Status = ReleaseStatus.InProgress
+            };
 
-                var stuckResources = await ScanForStuckResources();
-                result.ProcessedCount = stuckResources.Count;
+            _activeOperations.TryAdd(resource.Id, operation);
 
-                foreach (var resource in stuckResources)
-                {
-                    try
-                    {
-                        await ReleaseResource(resource);
-                        result.FreedCount++;
-                        result.ReclaimedMemoryBytes += resource.Size;
-
-                        _logger.Log(LogLevel.Information, "ResourceMonitor", "ResourceReleased", 
-                            $"Successfully released resource: {resource.Id}",
-                            new Dictionary<string, object>
-                            {
-                                { "ResourceId", resource.Id },
-                                { "ResourceType", resource.Type },
-                                { "Size", resource.Size },
-                                { "AllocationAge", resource.AllocationAge }
-                            });
-
-                        // Reset failure counter on success
-                        lock (_syncLock)
-                        {
-                            _failureCounters.Remove(resource.Id);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        HandleResourceReleaseFailure(resource, ex);
-                    }
-                }
-
-                return result;
-            }
-            catch (Exception ex)
+            var metrics = new Dictionary<string, object>
             {
-                _logger.Log(LogLevel.Error, "ResourceMonitor", "ScanError", 
-                    $"Error scanning for stuck allocations: {ex.Message}");
-                throw new ResourceMonitoringException("Failed to process stuck allocations", ex);
-            }
+                { "ResourceId", resource.Id },
+                { "ResourceType", resource.ResourceType },
+                { "StartTime", operation.StartTime },
+                { "InitialMemoryUsage", resource.MemoryUsage }
+            };
+
+            _loggingService.LogResourceAllocation(
+                resource.ResourceType.ToString(),
+                "ReleaseStart",
+                metrics,
+                nameof(ResourceReleaseMonitor));
+
+            await _dashboard.UpdateResourceOperation(resource.Id, "RELEASE_STARTED", metrics);
         }
 
-        private void HandleResourceReleaseFailure(Resource resource, Exception ex)
+        public async Task CompleteResourceRelease(ResourceInfo resource)
         {
-            lock (_syncLock)
+            if (_activeOperations.TryGetValue(resource.Id, out var operation))
             {
-                if (!_failureCounters.ContainsKey(resource.Id))
-                    _failureCounters[resource.Id] = 0;
-                _failureCounters[resource.Id]++;
+                operation.EndTime = DateTime.UtcNow;
+                operation.Status = ReleaseStatus.Completed;
+                operation.Duration = operation.EndTime - operation.StartTime;
 
-                var failureCount = _failureCounters[resource.Id];
-                var metadata = new Dictionary<string, object>
+                var metrics = new Dictionary<string, object>
                 {
                     { "ResourceId", resource.Id },
-                    { "FailureCount", failureCount },
-                    { "ExceptionType", ex.GetType().Name }
+                    { "ResourceType", resource.ResourceType },
+                    { "CompletionTime", operation.EndTime },
+                    { "Duration", operation.Duration },
+                    { "Status", "Completed" },
+                    { "MemoryFreed", resource.MemoryUsage }
                 };
 
-                if (failureCount >= MaxFailureRetries)
-                {
-                    _logger.Log(LogLevel.Critical, "ResourceMonitor", "MaxRetriesExceeded",
-                        $"Resource {resource.Id} has failed release {failureCount} times", metadata);
-                    // Could trigger emergency cleanup or alert operations team
-                }
-                else
-                {
-                    _logger.Log(LogLevel.Warning, "ResourceMonitor", "ReleaseFailed",
-                        $"Failed to release resource {resource.Id}. Attempt {failureCount} of {MaxFailureRetries}",
-                        metadata);
-                }
+                _loggingService.LogResourceDeallocation(
+                    resource.ResourceType.ToString(),
+                    "ReleaseComplete",
+                    metrics,
+                    nameof(ResourceReleaseMonitor));
+
+                await _dashboard.UpdateResourceOperation(resource.Id, "RELEASE_COMPLETED", metrics);
+                _activeOperations.TryRemove(resource.Id, out _);
             }
         }
 
-        public async Task ForceReleaseResources()
+        public async Task FailResourceRelease(ResourceInfo resource, Exception error)
         {
-            try
+            if (_activeOperations.TryGetValue(resource.Id, out var operation))
             {
-                _logger.Log(LogLevel.Warning, "ResourceMonitor", "ForceReleaseStart",
-                    "Starting forced release of all resources");
+                operation.EndTime = DateTime.UtcNow;
+                operation.Status = ReleaseStatus.Failed;
+                operation.Error = error;
+                operation.Duration = operation.EndTime - operation.StartTime;
 
-                // Implementation of force release
-                // This should be a more aggressive cleanup that might impact performance
-                // but ensures resources are freed
+                var metrics = new Dictionary<string, object>
+                {
+                    { "ResourceId", resource.Id },
+                    { "ResourceType", resource.ResourceType },
+                    { "FailureTime", operation.EndTime },
+                    { "Duration", operation.Duration },
+                    { "Status", "Failed" },
+                    { "ErrorType", error.GetType().Name },
+                    { "ErrorMessage", error.Message }
+                };
 
-                _logger.Log(LogLevel.Information, "ResourceMonitor", "ForceReleaseComplete",
-                    "Completed forced release of resources");
+                _loggingService.LogResourceError(
+                    resource.ResourceType.ToString(),
+                    $"Resource release failed: {error.Message}",
+                    error,
+                    nameof(ResourceReleaseMonitor));
+
+                await _dashboard.UpdateResourceOperation(resource.Id, "RELEASE_FAILED", metrics);
+                _activeOperations.TryRemove(resource.Id, out _);
             }
-            catch (Exception ex)
+        }
+
+        public async Task UpdateReleaseMetrics(ReleaseMetrics metrics)
+        {
+            var logMetrics = new Dictionary<string, object>
             {
-                _logger.Log(LogLevel.Critical, "ResourceMonitor", "ForceReleaseFailed",
-                    $"Failed to force release resources: {ex.Message}");
-                throw new ResourceCleanupException("Failed to force release resources", ex);
-            }
-        }
+                { "TotalResources", metrics.TotalResources },
+                { "SuccessfulReleases", metrics.SuccessfulReleases },
+                { "FailedReleases", metrics.FailedReleases },
+                { "LeaksDetected", metrics.LeaksDetected },
+                { "MemoryReclaimed", metrics.MemoryReclaimed },
+                { "ExecutionTime", metrics.ExecutionTime }
+            };
 
-        private async Task<List<Resource>> ScanForStuckResources()
-        {
-            // Implementation of resource scanning
-            return new List<Resource>();
-        }
+            _loggingService.LogResourceAllocation(
+                "ReleaseMetrics",
+                "MetricsUpdate",
+                logMetrics,
+                nameof(ResourceReleaseMonitor));
 
-        private async Task ReleaseResource(Resource resource)
-        {
-            // Implementation of resource release
+            await _dashboard.UpdateMetrics(logMetrics);
         }
+    }
 
-        private class Resource
-        {
-            public string Id { get; set; }
-            public string Type { get; set; }
-            public long Size { get; set; }
-            public TimeSpan AllocationAge { get; set; }
-        }
+    public class ResourceReleaseOperation
+    {
+        public string ResourceId { get; set; }
+        public string ResourceType { get; set; }
+        public DateTime StartTime { get; set; }
+        public DateTime EndTime { get; set; }
+        public TimeSpan Duration { get; set; }
+        public ReleaseStatus Status { get; set; }
+        public Exception Error { get; set; }
+    }
+
+    public enum ReleaseStatus
+    {
+        InProgress,
+        Completed,
+        Failed
+    }
+
+    public class ReleaseMetrics
+    {
+        public int TotalResources { get; set; }
+        public int SuccessfulReleases { get; set; }
+        public int FailedReleases { get; set; }
+        public int LeaksDetected { get; set; }
+        public long MemoryReclaimed { get; set; }
+        public TimeSpan ExecutionTime { get; set; }
     }
 }
