@@ -19,11 +19,13 @@ public class ConfigurationMigrationManager : IConfigurationMigrationManager
     private readonly string _migrationHistoryPath;
     private readonly List<MigrationRecord> _migrationHistory;
     private readonly JsonSerializerOptions _jsonOptions;
+    private readonly Dictionary<string, List<string>> _versionDependencies;
 
     public ConfigurationMigrationManager(
         ILogger<ConfigurationMigrationManager> logger,
         string backupPath = "config_backups",
-        string migrationHistoryPath = "config_migrations.json")
+        string migrationHistoryPath = "config_migrations.json",
+        string versionDependenciesPath = "config_dependencies.json")
     {
         _logger = logger;
         _backupPath = backupPath;
@@ -34,15 +36,74 @@ public class ConfigurationMigrationManager : IConfigurationMigrationManager
             PropertyNameCaseInsensitive = true
         };
 
-        // Load migration history
+        // Load migration history and version dependencies
         _migrationHistory = LoadMigrationHistory();
+        _versionDependencies = LoadVersionDependencies(versionDependenciesPath);
         
         // Ensure backup directory exists
         Directory.CreateDirectory(_backupPath);
     }
 
     /// <summary>
-    /// Checks if a configuration needs migration
+    /// Validates the version compatibility across related configuration sections
+    /// </summary>
+    public bool ValidateVersionCompatibility(string section, string version)
+    {
+        if (!_versionDependencies.TryGetValue(section, out var dependencies))
+        {
+            return true;
+        }
+
+        foreach (var dependency in dependencies)
+        {
+            var dependencyHistory = GetMigrationHistory(dependency).FirstOrDefault();
+            if (dependencyHistory == null)
+            {
+                continue;
+            }
+
+            if (!IsVersionCompatible(version, dependencyHistory.ToVersion))
+            {
+                _logger.LogError("Version {Version} of section {Section} is incompatible with version {DependencyVersion} of {Dependency}",
+                    version, section, dependencyHistory.ToVersion, dependency);
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Checks if two versions are compatible
+    /// </summary>
+    private bool IsVersionCompatible(string version1, string version2)
+    {
+        var v1 = Version.Parse(version1);
+        var v2 = Version.Parse(version2);
+
+        // Major version must match for compatibility
+        return v1.Major == v2.Major;
+    }
+
+    /// <summary>
+    /// Tracks dependencies between configuration sections
+    /// </summary>
+    public void AddVersionDependency(string section, string dependentSection)
+    {
+        if (!_versionDependencies.ContainsKey(section))
+        {
+            _versionDependencies[section] = new List<string>();
+        }
+
+        if (!_versionDependencies[section].Contains(dependentSection))
+        {
+            _versionDependencies[section].Add(dependentSection);
+            SaveVersionDependencies();
+        }
+    }
+
+    /// <summary>
+    /// Checks if configuration is compatible with current schema version
     /// </summary>
     public bool NeedsMigration<T>(string section, T configuration) where T : class
     {
@@ -62,6 +123,25 @@ public class ConfigurationMigrationManager : IConfigurationMigrationManager
     /// Performs a configuration migration
     /// </summary>
     public async Task<MigrationResult> MigrateConfiguration<T>(string section, T configuration) where T : class
+    {
+        var schemaVersion = GetConfigurationVersion<T>();
+        if (schemaVersion == null)
+        {
+            return MigrationResult.Failed<T>("Configuration class must be decorated with SchemaVersionAttribute");
+        }
+
+        if (!ValidateVersionCompatibility(section, schemaVersion))
+        {
+            return MigrationResult.Failed<T>("Configuration version is incompatible with dependent sections");
+        }
+
+        return await PerformMigration(section, configuration);
+    }
+
+    /// <summary>
+    /// Performs the actual migration process
+    /// </summary>
+    private async Task<MigrationResult> PerformMigration<T>(string section, T configuration) where T : class
     {
         var migratorType = GetMigratorType<T>();
         if (migratorType == null)
@@ -155,6 +235,17 @@ public class ConfigurationMigrationManager : IConfigurationMigrationManager
     /// </summary>
     private void RecordMigration(MigrationRecord record)
     {
+        // Validate version sequence integrity
+        var previousMigration = GetMigrationHistory(record.ConfigSection).FirstOrDefault();
+        if (previousMigration != null)
+        {
+            if (Version.Parse(record.FromVersion) != Version.Parse(previousMigration.ToVersion))
+            {
+                throw new InvalidOperationException(
+                    $"Invalid migration sequence. Expected migration from version {previousMigration.ToVersion} but got {record.FromVersion}");
+            }
+        }
+
         _migrationHistory.Add(record);
         SaveMigrationHistory();
     }
@@ -203,7 +294,72 @@ public class ConfigurationMigrationManager : IConfigurationMigrationManager
     /// </summary>
     private static string? GetConfigurationVersion<T>() where T : class
     {
-        return typeof(T).GetCustomAttribute<SchemaVersionAttribute>()?.Version;
+        var attribute = typeof(T).GetCustomAttribute<SchemaVersionAttribute>();
+        if (attribute == null)
+        {
+            return null;
+        }
+
+        if (!IsValidSemVer(attribute.Version))
+        {
+            throw new InvalidOperationException($"Invalid semantic version format: {attribute.Version}");
+        }
+
+        return attribute.Version;
+    }
+
+    /// <summary>
+    /// Validates semantic version format
+    /// </summary>
+    private static bool IsValidSemVer(string version)
+    {
+        try
+        {
+            return Version.TryParse(version, out _);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Loads version dependencies from disk
+    /// </summary>
+    private Dictionary<string, List<string>> LoadVersionDependencies(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return new Dictionary<string, List<string>>();
+        }
+
+        try
+        {
+            var json = File.ReadAllText(path);
+            return JsonSerializer.Deserialize<Dictionary<string, List<string>>>(json, _jsonOptions)
+                   ?? new Dictionary<string, List<string>>();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error loading version dependencies");
+            return new Dictionary<string, List<string>>();
+        }
+    }
+
+    /// <summary>
+    /// Saves version dependencies to disk
+    /// </summary>
+    private void SaveVersionDependencies()
+    {
+        try
+        {
+            var json = JsonSerializer.Serialize(_versionDependencies, _jsonOptions);
+            File.WriteAllText(_migrationHistoryPath.Replace("migrations", "dependencies"), json);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error saving version dependencies");
+        }
     }
 
     /// <summary>
