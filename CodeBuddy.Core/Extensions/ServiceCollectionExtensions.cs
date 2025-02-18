@@ -1,25 +1,22 @@
 using Microsoft.Extensions.DependencyInjection;
-using CodeBuddy.Core.Interfaces;
-using CodeBuddy.Core.Implementation;
-using CodeBuddy.Core.Implementation.Documentation;
+using CodeBuddy.Core.Implementation.ErrorHandling;
+using CodeBuddy.Core.Implementation.CodeValidation;
+using CodeBuddy.Core.Implementation.CodeValidation.Analytics;
 
 namespace CodeBuddy.Core.Extensions
 {
     public static class ServiceCollectionExtensions
     {
-        public static IServiceCollection AddCodeBuddyServices(this IServiceCollection services)
+        public static IServiceCollection AddCodeBuddyCore(this IServiceCollection services)
         {
-            // Core services
-            services.AddScoped<IPluginManager, PluginManager>();
-            services.AddScoped<IPluginConfiguration, DefaultPluginConfiguration>();
-            services.AddScoped<IPluginState, DefaultPluginState>();
-            services.AddScoped<IPluginAuthService, DefaultPluginAuthService>();
-            services.AddScoped<IConfigurationManager, ConfigurationManager>();
-            services.AddScoped<ICodeGenerator, CodeGenerator>();
-            services.AddScoped<IFileOperations, FileOperations>();
-            services.AddScoped<ITemplateManager, TemplateManager>();
-            services.AddScoped<IDocumentationGenerator, DocumentationGenerator>();
-            
+            // Error handling and analytics services
+            services.AddScoped<IErrorHandlingService, ErrorHandlingService>();
+            services.AddScoped<IErrorAnalyticsService, ErrorAnalyticsService>();
+            services.AddScoped<IErrorMonitoringDashboard, ErrorMonitoringDashboard>();
+
+            // Time series storage for analytics
+            services.AddSingleton<ITimeSeriesStorage, TimeSeriesStorage>();
+
             return services;
         }
     }
