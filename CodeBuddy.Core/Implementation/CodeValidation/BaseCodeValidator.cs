@@ -90,6 +90,7 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     private readonly PerformanceMonitor _performanceMonitor = new();
     private readonly List<string> _temporaryFiles = new();
     private readonly ResourceUsageTracker _resourceTracker;
+    private readonly ResourcePreallocationManager _resourceManager;
     private readonly ObjectPool<byte[]> _bufferPool;
     private readonly MemoryPressureMonitor _memoryMonitor;
     
@@ -124,6 +125,12 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
         _progress = new FileOperationProgress();
         _validationQueue = new BlockingCollection<ValidationTask>(MaxQueueSize);
         _queueProcessingCts = new CancellationTokenSource();
+        
+        // Initialize resource preallocation manager
+        _resourceManager = new ResourcePreallocationManager(
+            _resourceTracker,
+            new ResourceTrendAnalyzer(),
+            new ValidationPipelineDashboard(_logger));
         
         // Start queue processing
         _queueProcessingTask = ProcessValidationQueueAsync(_queueProcessingCts.Token);
@@ -233,6 +240,17 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
         try
         {
             ThrowIfDisposed();
+            
+            // Preallocate resources based on validation context
+            var context = new ValidationContext
+            {
+                CodeSize = code.Length,
+                ValidationType = GetValidationType(options),
+                IsHighPriority = options.IsHighPriority ?? false,
+                EstimatedComplexity = CalculateComplexity(code)
+            };
+            
+            using var allocation = await _resourceManager.PreallocateResourcesAsync(context);
             
             // Monitor resource usage
             await MonitorResourcesAsync(cancellationToken);
@@ -1016,6 +1034,27 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
 
         // Detect bottlenecks
         DetectBottlenecks(metrics);
+    }
+
+    private ValidationType GetValidationType(ValidationOptions options)
+    {
+        var types = new List<ValidationSubType>();
+        if (options.ValidateSyntax) types.Add(ValidationSubType.Syntax);
+        if (options.ValidateSecurity) types.Add(ValidationSubType.Security);
+        if (options.ValidateStyle) types.Add(ValidationSubType.Style);
+        if (options.ValidateBestPractices) types.Add(ValidationSubType.BestPractices);
+        if (options.ValidateErrorHandling) types.Add(ValidationSubType.ErrorHandling);
+        
+        return new ValidationType(types);
+    }
+
+    private int CalculateComplexity(string code)
+    {
+        // Basic complexity calculation based on code length and structure
+        var complexity = code.Length / 1000; // Base complexity on KB
+        complexity += code.Count(c => c == '{'); // Add complexity for code blocks
+        complexity += code.Count(c => c == '\n'); // Add complexity for number of lines
+        return complexity;
     }
 
     private void DetectBottlenecks(PerformanceMetrics metrics)
