@@ -645,9 +645,12 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
         var stringBuilderPool = _resourcePoolManager.GetPool<StringBuilder>("StringBuilderPool");
         var memoryStreamPool = _resourcePoolManager.GetPool<MemoryStream>("MemoryStreamPool");
 
-        var buffer = bufferPool.Acquire();
-        var stringBuilder = stringBuilderPool.Acquire();
-        var memoryStream = memoryStreamPool.Acquire();
+        // Use priority based on validation options
+        var priority = DeterminePriority(options);
+        
+        var buffer = bufferPool.Acquire(priority);
+        var stringBuilder = stringBuilderPool.Acquire(priority);
+        var memoryStream = memoryStreamPool.Acquire(priority);
 
         try
         {
@@ -807,11 +810,60 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
         DetectBottlenecks(metrics);
     }
 
+    private ResourcePriority DeterminePriority(ValidationOptions options)
+    {
+        // Determine priority based on validation requirements
+        if (options.ValidateSecurity)
+            return ResourcePriority.Critical;
+        if (options.ValidateErrorHandling)
+            return ResourcePriority.High;
+        if (options.ValidateBestPractices)
+            return ResourcePriority.Normal;
+        return ResourcePriority.Low;
+    }
+
     private void DetectBottlenecks(PerformanceMetrics metrics)
     {
+        var bufferPool = _resourcePoolManager.GetPool<byte[]>("BufferPool");
+        var stringBuilderPool = _resourcePoolManager.GetPool<StringBuilder>("StringBuilderPool");
+        var memoryStreamPool = _resourcePoolManager.GetPool<MemoryStream>("MemoryStreamPool");
+        var httpClientPool = _resourcePoolManager.GetPool<HttpClient>("HttpClientPool");
+        var dbConnectionPool = _resourcePoolManager.GetPool<DbConnection>("DbConnectionPool");
+
         // Track validation queue metrics
         metrics.ResourceUtilization["QueueLength"] = _validationQueue.Count;
         metrics.ResourceUtilization["QueueCapacityPercent"] = (_validationQueue.Count / (double)MaxQueueSize) * 100;
+
+        // Track detailed pool metrics including priority distribution
+        foreach (var pool in new[] { bufferPool, stringBuilderPool, memoryStreamPool, httpClientPool, dbConnectionPool })
+        {
+            var stats = pool.GetPoolStatistics();
+            var utilization = pool.GetUtilizationRate();
+            var distribution = pool.GetPriorityDistribution();
+
+            var poolName = pool.GetType().GetGenericArguments()[0].Name;
+            metrics.ResourceUtilization[$"{poolName}PoolTotal"] = stats.total;
+            metrics.ResourceUtilization[$"{poolName}PoolAvailable"] = stats.available;
+            metrics.ResourceUtilization[$"{poolName}PoolInUse"] = stats.inUse;
+            metrics.ResourceUtilization[$"{poolName}PoolUtilization"] = utilization;
+
+            foreach (var kvp in distribution)
+            {
+                metrics.ResourceUtilization[$"{poolName}Pool_{kvp.Key}"] = kvp.Value;
+            }
+
+            // Add pool-specific bottleneck detection
+            if (utilization > 0.8) // 80% utilization threshold
+            {
+                metrics.Bottlenecks.Add(new PerformanceBottleneck
+                {
+                    Phase = $"{poolName}Pool",
+                    Description = $"High pool utilization: {utilization:P0}",
+                    ImpactScore = (int)(utilization * 100),
+                    Recommendation = $"Consider increasing {poolName} pool size or optimizing resource usage"
+                });
+            }
+        }
 
         // Identify phases that took more than 25% of total time
         var totalTime = metrics.PhaseTimings.Values.Sum(t => t.TotalMilliseconds);

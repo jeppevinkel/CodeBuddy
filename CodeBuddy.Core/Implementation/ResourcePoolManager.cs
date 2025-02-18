@@ -2,6 +2,12 @@ using System;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Text;
+using System.Net.Http;
+using System.Data;
+using System.Data.Common;
+using System.Data.SqlClient;
+using System.Net;
+using System.Configuration;
 
 namespace CodeBuddy.Core.Implementation
 {
@@ -36,6 +42,12 @@ namespace CodeBuddy.Core.Implementation
             InitializePools();
         }
 
+        private string GetConnectionString()
+        {
+            return ConfigurationManager.ConnectionStrings["ValidationDB"]?.ConnectionString 
+                ?? throw new InvalidOperationException("ValidationDB connection string not found");
+        }
+
         private void InitializePools()
         {
             // Initialize buffer pool
@@ -59,6 +71,32 @@ namespace CodeBuddy.Core.Implementation
             CreatePool<StringReader>("StringReaderPool", 
                 () => new StringReader(string.Empty), 
                 maxPoolSize: 30);
+
+            // Initialize HttpClient pool
+            CreatePool<HttpClient>("HttpClientPool",
+                () => new HttpClient { Timeout = TimeSpan.FromSeconds(30) },
+                cleanup: client => 
+                {
+                    client.CancelPendingRequests();
+                    client.DefaultRequestHeaders.Clear();
+                },
+                maxPoolSize: 10);
+
+            // Initialize DbConnection pool
+            CreatePool<DbConnection>("DbConnectionPool",
+                () => new SqlConnection(GetConnectionString()),
+                cleanup: conn => 
+                {
+                    if (conn.State != ConnectionState.Closed)
+                        conn.Close();
+                },
+                maxPoolSize: 20);
+
+            // Initialize WebClient pool
+            CreatePool<WebClient>("WebClientPool",
+                () => new WebClient { Timeout = 30000 },
+                cleanup: client => client.CancelAsync(),
+                maxPoolSize: 15);
         }
 
         public ResourcePool<T> GetPool<T>(string poolName) where T : class
