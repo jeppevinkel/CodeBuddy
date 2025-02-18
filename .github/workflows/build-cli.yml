@@ -28,7 +28,9 @@ jobs:
       run: dotnet publish CodeBuddy.CLI/CodeBuddy.CLI.csproj -c Release -o publish
       
     - name: Upload CLI artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: codebuddy-cli
         path: publish/
+        if-no-files-found: error
+        compression-level: 6
