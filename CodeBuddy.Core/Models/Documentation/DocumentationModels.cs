@@ -12,6 +12,7 @@ namespace CodeBuddy.Core.Models.Documentation
         public List<TypeDocumentation> Types { get; set; } = new List<TypeDocumentation>();
         public List<PluginDocumentation> Plugins { get; set; } = new List<PluginDocumentation>();
         public ValidationDocumentation Validation { get; set; }
+        public List<CodeExample> Examples { get; set; } = new List<CodeExample>();
     }
 
     /// <summary>

@@ -17,6 +17,8 @@ namespace CodeBuddy.Core.Implementation.Documentation
         private readonly IConfigurationManager _configManager;
         private readonly IPluginManager _pluginManager;
         private readonly IFileOperations _fileOps;
+        private readonly DiagramGenerator _diagramGenerator;
+        private readonly UsageExampleGenerator _exampleGenerator;
 
         public DocumentationGenerator(
             IConfigurationManager configManager,
@@ -26,6 +28,8 @@ namespace CodeBuddy.Core.Implementation.Documentation
             _configManager = configManager;
             _pluginManager = pluginManager;
             _fileOps = fileOps;
+            _diagramGenerator = new DiagramGenerator();
+            _exampleGenerator = new UsageExampleGenerator(pluginManager, configManager, fileOps);
         }
 
         /// <summary>
@@ -63,6 +67,24 @@ namespace CodeBuddy.Core.Implementation.Documentation
                 }
 
                 // Generate markdown files
+                // Generate class diagrams and dependency graphs
+                var types = assemblies.SelectMany(a => a.GetTypes().Where(t => t.IsPublic));
+                var classDiagram = _diagramGenerator.GenerateClassDiagram(types);
+                var dependencyGraph = _diagramGenerator.GenerateDependencyGraph(types);
+                
+                await _fileOps.WriteFileAsync("docs/diagrams/classes.puml", classDiagram);
+                await _fileOps.WriteFileAsync("docs/diagrams/dependencies.dot", dependencyGraph);
+
+                // Generate usage examples
+                var validationExamples = await _exampleGenerator.GenerateValidationExamplesAsync();
+                var pluginExamples = await _exampleGenerator.GeneratePluginExamplesAsync();
+                var errorHandlingExamples = await _exampleGenerator.GenerateErrorHandlingExamplesAsync();
+
+                result.Examples = new List<CodeExample>();
+                result.Examples.AddRange(validationExamples);
+                result.Examples.AddRange(pluginExamples);
+                result.Examples.AddRange(errorHandlingExamples);
+
                 await GenerateMarkdownFiles(result);
                 await GenerateTypeScriptDefinitions(result);
                 
