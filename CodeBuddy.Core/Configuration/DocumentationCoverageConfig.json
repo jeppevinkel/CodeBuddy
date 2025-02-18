@@ -1,0 +1,18 @@
+{
+  "thresholds": {
+    "minimumPublicApiCoverage": 0.8,
+    "minimumParameterDocumentationCoverage": 0.9,
+    "minimumCodeExampleCoverage": 0.5,
+    "minimumInterfaceDocumentationCompleteness": 0.8,
+    "minimumCrossReferenceValidity": 0.95
+  },
+  "includedAssemblies": [
+    "CodeBuddy.Core",
+    "CodeBuddy.CLI"
+  ],
+  "excludedAssemblies": [
+    "CodeBuddy.Tests",
+    "CodeBuddy.IntegrationTests",
+    "CodeBuddy.E2ETests"
+  ]
+}
