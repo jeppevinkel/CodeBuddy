@@ -9,6 +9,8 @@ using System.Threading.Tasks;
 using System.Runtime.CompilerServices;
 using CodeBuddy.Core.Models;
 using Microsoft.Extensions.Logging;
+using System.Text;
+using System.IO;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation;
 
@@ -90,7 +92,7 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     private readonly PerformanceMonitor _performanceMonitor = new();
     private readonly List<string> _temporaryFiles = new();
     private readonly ResourceUsageTracker _resourceTracker;
-    private readonly ObjectPool<byte[]> _bufferPool;
+    private readonly ResourcePoolManager _resourcePoolManager;
     private readonly ConcurrentQueue<IDisposable> _disposables = new();
     private readonly SemaphoreSlim _cleanupLock = new(1, 1);
     private readonly BlockingCollection<ValidationTask> _validationQueue;
@@ -112,7 +114,7 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     {
         _logger = logger;
         _resourceTracker = new ResourceUsageTracker();
-        _bufferPool = ObjectPool.Create<byte[]>();
+        _resourcePoolManager = ResourcePoolManager.Instance;
         _progress = new FileOperationProgress();
         _validationQueue = new BlockingCollection<ValidationTask>(MaxQueueSize);
         _queueProcessingCts = new CancellationTokenSource();
@@ -638,15 +640,24 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
 
     private async Task<ValidationResult> ProcessBatchAsync(string batch, ValidationOptions options, CancellationToken cancellationToken)
     {
-        // Get buffer from pool
-        var buffer = _bufferPool.Get();
+        // Get resources from pools
+        var bufferPool = _resourcePoolManager.GetPool<byte[]>("BufferPool");
+        var stringBuilderPool = _resourcePoolManager.GetPool<StringBuilder>("StringBuilderPool");
+        var memoryStreamPool = _resourcePoolManager.GetPool<MemoryStream>("MemoryStreamPool");
+
+        var buffer = bufferPool.Acquire();
+        var stringBuilder = stringBuilderPool.Acquire();
+        var memoryStream = memoryStreamPool.Acquire();
+
         try
         {
-            return await ValidateWithResourceTrackingAsync(batch, options, buffer, cancellationToken);
+            return await ValidateWithResourceTrackingAsync(batch, options, buffer, stringBuilder, memoryStream, cancellationToken);
         }
         finally
         {
-            _bufferPool.Return(buffer);
+            bufferPool.Release(buffer);
+            stringBuilderPool.Release(stringBuilder);
+            memoryStreamPool.Release(memoryStream);
         }
     }
 
