@@ -1,8 +1,14 @@
 using System;
 using System.Collections.Concurrent;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Linq;
 using Microsoft.Extensions.Logging;
 using CodeBuddy.Core.Models;
+using CodeBuddy.Core.Models.Analytics;
 using CodeBuddy.Core.Implementation.CodeValidation.Monitoring;
+using CodeBuddy.Core.Implementation.CodeValidation.Analytics;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation;
 
@@ -16,6 +22,10 @@ public class ValidationPipeline
     private readonly IMetricsAggregator _metricsAggregator;
     private readonly IResourceAlertManager _alertManager;
     private readonly IResourceAnalytics _resourceAnalytics;
+    private readonly ITelemetrySystem _telemetrySystem;
+    private readonly ITimeSeriesStorage _timeSeriesStorage;
+    private readonly IMetricsDashboard _metricsDashboard;
+    private readonly IAnalyticsDashboard _analyticsDashboard;
     
     // Resource throttling state
     private readonly SemaphoreSlim _validationThrottle;
@@ -29,7 +39,11 @@ public class ValidationPipeline
         ValidationResilienceConfig config,
         IMetricsAggregator metricsAggregator,
         IResourceAlertManager alertManager,
-        IResourceAnalytics resourceAnalytics)
+        IResourceAnalytics resourceAnalytics,
+        ITelemetrySystem telemetrySystem,
+        ITimeSeriesStorage timeSeriesStorage,
+        IMetricsDashboard metricsDashboard,
+        IAnalyticsDashboard analyticsDashboard)
     {
         _logger = logger;
         _middleware = new List<IValidationMiddleware>();
@@ -39,6 +53,10 @@ public class ValidationPipeline
         _metricsAggregator = metricsAggregator;
         _alertManager = alertManager;
         _resourceAnalytics = resourceAnalytics;
+        _telemetrySystem = telemetrySystem;
+        _timeSeriesStorage = timeSeriesStorage;
+        _metricsDashboard = metricsDashboard;
+        _analyticsDashboard = analyticsDashboard;
         
         // Initialize resource throttling
         _validationThrottle = new SemaphoreSlim(config.MaxConcurrentValidations);
@@ -345,6 +363,29 @@ public class ValidationPipeline
         public ResourceMetrics Metrics { get; set; }
     }
 
+    private class ValidationTelemetryData
+    {
+        public string ValidationId { get; set; }
+        public DateTime StartTime { get; set; }
+        public DateTime? EndTime { get; set; }
+        public TimeSpan Duration => EndTime?.Subtract(StartTime) ?? TimeSpan.Zero;
+        public bool IsSuccess { get; set; }
+        public int RetryAttempts { get; set; }
+        public List<string> FailedMiddleware { get; set; } = new();
+        public ResourceMetrics PeakResourceUsage { get; set; }
+        public Dictionary<string, MiddlewarePerformanceData> MiddlewarePerformance { get; set; } = new();
+        public Dictionary<string, double> CustomMetrics { get; set; } = new();
+    }
+
+    private class MiddlewarePerformanceData
+    {
+        public TimeSpan TotalDuration { get; set; }
+        public int ExecutionCount { get; set; }
+        public int FailureCount { get; set; }
+        public TimeSpan AverageLatency => ExecutionCount > 0 ? TimeSpan.FromTicks(TotalDuration.Ticks / ExecutionCount) : TimeSpan.Zero;
+        public Dictionary<string, double> CustomMetrics { get; set; } = new();
+    }
+
     private class ResourceMetrics
     {
         public double CpuUsagePercent { get; set; }
@@ -507,6 +548,8 @@ public class ValidationPipeline
         };
     }
 
+    private readonly ConcurrentDictionary<string, ValidationTelemetryData> _activeTelemetry = new();
+
     private async void EmitResourceMetrics()
     {
         var metrics = new ResourceMetrics
@@ -516,6 +559,22 @@ public class ValidationPipeline
             DiskIoMBPS = GetDiskIoRate(),
             ActiveThreads = GetActiveThreadCount()
         };
+
+        // Record in time series storage
+        await _timeSeriesStorage.StoreMetricsAsync(new MetricsDataPoint
+        {
+            Timestamp = DateTime.UtcNow,
+            MetricName = "ResourceUtilization",
+            Values = new Dictionary<string, double>
+            {
+                ["CpuUsagePercent"] = metrics.CpuUsagePercent,
+                ["MemoryUsageMB"] = metrics.MemoryUsageMB,
+                ["DiskIoMBPS"] = metrics.DiskIoMBPS,
+                ["ActiveThreads"] = metrics.ActiveThreads
+            }
+        });
+
+        // Update metrics aggregator
         _metricsAggregator.RecordResourceUtilization(metrics);
 
         // Send metrics to alert manager for analysis
@@ -566,6 +625,78 @@ public class ValidationPipeline
     {
         var process = System.Diagnostics.Process.GetCurrentProcess();
         return (process.ReadBytes + process.WriteBytes) / (1024.0 * 1024.0);
+    }
+
+    private async Task RecordTelemetryDataAsync(ValidationTelemetryData telemetryData)
+    {
+        // Store in time series database
+        await _timeSeriesStorage.StoreMetricsAsync(new MetricsDataPoint
+        {
+            Timestamp = telemetryData.EndTime ?? DateTime.UtcNow,
+            MetricName = "ValidationExecution",
+            Tags = new Dictionary<string, string>
+            {
+                ["ValidationId"] = telemetryData.ValidationId,
+                ["Success"] = telemetryData.IsSuccess.ToString()
+            },
+            Values = new Dictionary<string, double>
+            {
+                ["DurationMs"] = telemetryData.Duration.TotalMilliseconds,
+                ["RetryAttempts"] = telemetryData.RetryAttempts,
+                ["FailedMiddlewareCount"] = telemetryData.FailedMiddleware.Count
+            }
+        });
+
+        // Record detailed telemetry
+        await _telemetrySystem.RecordValidationTelemetryAsync(new ValidationTelemetryEvent
+        {
+            ValidationId = telemetryData.ValidationId,
+            StartTime = telemetryData.StartTime,
+            EndTime = telemetryData.EndTime ?? DateTime.UtcNow,
+            Success = telemetryData.IsSuccess,
+            RetryAttempts = telemetryData.RetryAttempts,
+            FailedMiddleware = telemetryData.FailedMiddleware,
+            ResourceMetrics = new ResourceMetricsData
+            {
+                PeakCpuUsage = telemetryData.PeakResourceUsage?.CpuUsagePercent ?? 0,
+                PeakMemoryUsage = telemetryData.PeakResourceUsage?.MemoryUsageMB ?? 0,
+                PeakDiskIo = telemetryData.PeakResourceUsage?.DiskIoMBPS ?? 0,
+                PeakThreadCount = telemetryData.PeakResourceUsage?.ActiveThreads ?? 0
+            },
+            MiddlewarePerformance = telemetryData.MiddlewarePerformance.ToDictionary(
+                kvp => kvp.Key,
+                kvp => new MiddlewarePerformanceMetrics
+                {
+                    TotalDuration = kvp.Value.TotalDuration,
+                    ExecutionCount = kvp.Value.ExecutionCount,
+                    FailureCount = kvp.Value.FailureCount,
+                    AverageLatency = kvp.Value.AverageLatency,
+                    CustomMetrics = kvp.Value.CustomMetrics
+                }),
+            CustomMetrics = telemetryData.CustomMetrics
+        });
+
+        // Update dashboards
+        await _metricsDashboard.UpdateValidationMetricsAsync(new ValidationMetricsUpdate
+        {
+            ValidationId = telemetryData.ValidationId,
+            ExecutionTime = telemetryData.Duration,
+            Success = telemetryData.IsSuccess,
+            ResourceUsage = telemetryData.PeakResourceUsage
+        });
+
+        await _analyticsDashboard.ProcessValidationDataAsync(new ValidationAnalyticsData
+        {
+            ValidationId = telemetryData.ValidationId,
+            Timestamp = telemetryData.EndTime ?? DateTime.UtcNow,
+            Duration = telemetryData.Duration,
+            Success = telemetryData.IsSuccess,
+            RetryAttempts = telemetryData.RetryAttempts,
+            FailedMiddleware = telemetryData.FailedMiddleware,
+            ResourceMetrics = telemetryData.PeakResourceUsage,
+            MiddlewarePerformance = telemetryData.MiddlewarePerformance,
+            CustomMetrics = telemetryData.CustomMetrics
+        });
     }
 
     private int GetActiveThreadCount()
