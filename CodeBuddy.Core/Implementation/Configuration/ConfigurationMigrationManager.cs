@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -8,6 +9,7 @@ using CodeBuddy.Core.Models.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace CodeBuddy.Core.Implementation.Configuration;
+
 
 /// <summary>
 /// Manages configuration migrations and version tracking
@@ -20,6 +22,9 @@ public class ConfigurationMigrationManager : IConfigurationMigrationManager
     private readonly List<MigrationRecord> _migrationHistory;
     private readonly JsonSerializerOptions _jsonOptions;
     private readonly Dictionary<string, List<string>> _versionDependencies;
+    private readonly int _maxBackupCount = 10;
+    private readonly string _environment;
+    private ConfigurationSnapshot? _currentSnapshot;
 
     public ConfigurationMigrationManager(
         ILogger<ConfigurationMigrationManager> logger,
@@ -139,7 +144,7 @@ public class ConfigurationMigrationManager : IConfigurationMigrationManager
     }
 
     /// <summary>
-    /// Performs the actual migration process
+    /// Performs the actual migration process with enhanced validation and error recovery
     /// </summary>
     private async Task<MigrationResult> PerformMigration<T>(string section, T configuration) where T : class
     {
@@ -149,45 +154,128 @@ public class ConfigurationMigrationManager : IConfigurationMigrationManager
             return MigrationResult.Success(configuration);
         }
 
+        // Detect circular dependencies
+        if (HasCircularDependencies(section))
+        {
+            return MigrationResult.Failed<T>("Circular dependency detected in configuration relationships");
+        }
+
+        // Create pre-migration snapshot and validation context
+        _currentSnapshot = await CreateConfigurationSnapshot();
+        var context = new PreMigrationContext
+        {
+            CurrentConfigurations = _currentSnapshot.Configurations,
+            TargetVersions = _currentSnapshot.Versions,
+            Dependencies = _versionDependencies
+        };
+
+        // Create detailed diagnostic context for error reporting
+        var diagnostics = new Dictionary<string, object>
+        {
+            ["ConfigSection"] = section,
+            ["MigrationTime"] = DateTime.UtcNow,
+            ["Environment"] = _environment,
+            ["Dependencies"] = GetDependencyVersions(section),
+            ["PreMigrationState"] = configuration
+        };
+
         try
         {
-            // Create backup
-            var backupPath = await CreateBackup(section, configuration);
-            
-            // Perform migration
+            // Pre-migration validation
             var migrator = CreateMigrator(migratorType);
-            var migrated = migrator.Migrate(configuration);
-            
-            // Validate result
-            var validationResult = migrator.Validate(migrated);
-            if (!validationResult.IsValid)
+            var preValidation = migrator.Validate(configuration);
+            if (!preValidation.IsValid)
             {
-                _logger.LogError("Migration validation failed for section {Section}. Errors: {Errors}",
-                    section, string.Join(", ", validationResult.Errors));
-                
-                // Restore from backup
-                var restored = await RestoreFromBackup<T>(backupPath);
-                return MigrationResult.Failed<T>(
-                    validationResult.Errors.FirstOrDefault() ?? "Migration validation failed",
-                    restored);
+                diagnostics["PreValidationErrors"] = preValidation.Errors;
+                _logger.LogError("Pre-migration validation failed for section {Section}. Errors: {Errors}",
+                    section, string.Join(", ", preValidation.Errors));
+                return MigrationResult.Failed<T>("Pre-migration validation failed", configuration);
             }
 
-            // Record successful migration
-            RecordMigration(new MigrationRecord
+            // Create backup with compression and metadata
+            var backupPath = await CreateBackup(section, configuration);
+            diagnostics["BackupPath"] = backupPath;
+            
+            // Perform migration
+            var migrated = migrator.Migrate(configuration);
+            diagnostics["PostMigrationState"] = migrated;
+            
+            // Post-migration validation
+            var postValidation = migrator.Validate(migrated);
+            if (!postValidation.IsValid)
+            {
+                diagnostics["PostValidationErrors"] = postValidation.Errors;
+                _logger.LogError("Post-migration validation failed for section {Section}. Errors: {Errors}",
+                    section, string.Join(", ", postValidation.Errors));
+                
+                // Atomic rollback using snapshot
+                foreach (var (key, value) in _currentSnapshot!.Configurations)
+                {
+                    await File.WriteAllTextAsync(
+                        Path.Combine(_backupPath, $"{key}_current.json"),
+                        JsonSerializer.Serialize(value, _jsonOptions));
+                }
+                
+                return MigrationResult.Failed<T>(
+                    postValidation.Errors.FirstOrDefault() ?? "Post-migration validation failed",
+                    configuration);
+            }
+
+            // Cross-reference validation
+            var dependencyValidation = ValidateDependencyIntegrity(section, migrator.ToVersion);
+            if (!dependencyValidation.IsValid)
+            {
+                diagnostics["DependencyValidationErrors"] = dependencyValidation.Errors;
+                _logger.LogError("Dependency validation failed for section {Section}. Errors: {Errors}",
+                    section, string.Join(", ", dependencyValidation.Errors));
+                return MigrationResult.Failed<T>("Dependency validation failed", configuration);
+            }
+
+            // Record successful migration with detailed diagnostics
+            var record = new MigrationRecord
             {
                 ConfigSection = section,
                 FromVersion = migrator.FromVersion,
                 ToVersion = migrator.ToVersion,
                 MigrationDate = DateTime.UtcNow,
                 Success = true,
-                BackupPath = backupPath
-            });
-
+                BackupPath = backupPath,
+                Description = JsonSerializer.Serialize(diagnostics, _jsonOptions)
+            };
+            
+            RecordMigration(record);
             return MigrationResult.Success((T)migrated);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error migrating configuration for section {Section}", section);
+            diagnostics["Error"] = new
+            {
+                Message = ex.Message,
+                StackTrace = ex.StackTrace,
+                InnerException = ex.InnerException?.Message
+            };
+
+            _logger.LogError(ex, "Error migrating configuration for section {Section}. Diagnostics: {Diagnostics}", 
+                section, JsonSerializer.Serialize(diagnostics, _jsonOptions));
+
+            // Ensure atomic rollback on error
+            if (_currentSnapshot != null)
+            {
+                try
+                {
+                    foreach (var (key, value) in _currentSnapshot.Configurations)
+                    {
+                        await File.WriteAllTextAsync(
+                            Path.Combine(_backupPath, $"{key}_current.json"),
+                            JsonSerializer.Serialize(value, _jsonOptions));
+                    }
+                }
+                catch (Exception rollbackEx)
+                {
+                    _logger.LogError(rollbackEx, "Error during rollback for section {Section}", section);
+                }
+            }
+
             return MigrationResult.Failed<T>($"Migration failed: {ex.Message}");
         }
     }
@@ -203,21 +291,253 @@ public class ConfigurationMigrationManager : IConfigurationMigrationManager
     }
 
     /// <summary>
-    /// Creates a backup of the configuration
+    /// Creates a backup of the configuration with compression and metadata
     /// </summary>
     private async Task<string> CreateBackup<T>(string section, T configuration) where T : class
     {
         var timestamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
-        var backupPath = Path.Combine(_backupPath, $"{section}_{timestamp}.json");
-        
-        await File.WriteAllTextAsync(backupPath, 
-            JsonSerializer.Serialize(configuration, _jsonOptions));
-        
-        return backupPath;
+        var baseFileName = $"{section}_{timestamp}";
+        var jsonPath = Path.Combine(_backupPath, $"{baseFileName}.json");
+        var zipPath = Path.Combine(_backupPath, $"{baseFileName}.zip");
+        var metadataPath = Path.Combine(_backupPath, $"{baseFileName}_metadata.json");
+
+        // Serialize configuration
+        var configJson = JsonSerializer.Serialize(configuration, _jsonOptions);
+        await File.WriteAllTextAsync(jsonPath, configJson);
+
+        // Create zip archive
+        using (var zipArchive = ZipFile.Open(zipPath, ZipArchiveMode.Create))
+        {
+            zipArchive.CreateEntryFromFile(jsonPath, Path.GetFileName(jsonPath));
+        }
+
+        // Create and save metadata
+        var metadata = new BackupMetadata
+        {
+            BackupPath = zipPath,
+            CreatedAt = DateTime.UtcNow,
+            Environment = _environment,
+            Dependencies = GetDependencyVersions(section),
+            IsCompressed = true,
+            OriginalSize = new FileInfo(jsonPath).Length,
+            CompressedSize = new FileInfo(zipPath).Length
+        };
+
+        await File.WriteAllTextAsync(metadataPath,
+            JsonSerializer.Serialize(metadata, _jsonOptions));
+
+        // Cleanup uncompressed file
+        File.Delete(jsonPath);
+
+        // Enforce backup rotation
+        await EnforceBackupRotation(section);
+
+        return zipPath;
     }
 
     /// <summary>
-    /// Restores configuration from a backup file
+    /// Creates a complete snapshot of current configuration state
+    /// </summary>
+    private async Task<ConfigurationSnapshot> CreateConfigurationSnapshot()
+    {
+        var snapshot = new ConfigurationSnapshot
+        {
+            CreatedAt = DateTime.UtcNow,
+            Description = "Pre-migration snapshot"
+        };
+
+        foreach (var section in _versionDependencies.Keys)
+        {
+            var configPath = Path.Combine(_backupPath, $"{section}_current.json");
+            if (File.Exists(configPath))
+            {
+                var json = await File.ReadAllTextAsync(configPath);
+                snapshot.Configurations[section] = JsonSerializer.Deserialize<object>(json, _jsonOptions)!;
+                snapshot.Versions[section] = GetCurrentVersion(section);
+            }
+        }
+
+        return snapshot;
+    }
+
+    /// <summary>
+    /// Gets the current version for a configuration section
+    /// </summary>
+    private string GetCurrentVersion(string section)
+    {
+        var history = GetMigrationHistory(section).FirstOrDefault();
+        return history?.ToVersion ?? "1.0.0";
+    }
+
+    /// <summary>
+    /// Gets all dependency versions for a section
+    /// </summary>
+    private Dictionary<string, string> GetDependencyVersions(string section)
+    {
+        var versions = new Dictionary<string, string>();
+        if (_versionDependencies.TryGetValue(section, out var dependencies))
+        {
+            foreach (var dependency in dependencies)
+            {
+                versions[dependency] = GetCurrentVersion(dependency);
+            }
+        }
+        return versions;
+    }
+
+    /// <summary>
+    /// Enforces backup rotation policy
+    /// </summary>
+    private async Task EnforceBackupRotation(string section)
+    {
+        var backups = Directory.GetFiles(_backupPath, $"{section}_*.zip")
+            .OrderByDescending(f => File.GetCreationTime(f))
+            .Skip(_maxBackupCount);
+
+        foreach (var backup in backups)
+        {
+            try
+            {
+                File.Delete(backup);
+                var metadataFile = backup.Replace(".zip", "_metadata.json");
+                if (File.Exists(metadataFile))
+                {
+                    File.Delete(metadataFile);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error cleaning up old backup: {Path}", backup);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Detects circular dependencies in configuration relationships
+    /// </summary>
+    private bool HasCircularDependencies(string section, HashSet<string>? visited = null)
+    {
+        visited ??= new HashSet<string>();
+        
+        if (!_versionDependencies.TryGetValue(section, out var dependencies))
+        {
+            return false;
+        }
+
+        if (!visited.Add(section))
+        {
+            return true; // Circular dependency detected
+        }
+
+        foreach (var dependency in dependencies)
+        {
+            if (HasCircularDependencies(dependency, visited))
+            {
+                return true;
+            }
+        }
+
+        visited.Remove(section);
+        return false;
+    }
+
+    /// <summary>
+    /// Validates version sequence integrity with enhanced checks
+    /// </summary>
+    private void ValidateVersionSequence(MigrationRecord record)
+    {
+        var previousMigration = GetMigrationHistory(record.ConfigSection).FirstOrDefault();
+        if (previousMigration != null)
+        {
+            var fromVersion = Version.Parse(record.FromVersion);
+            var expectedVersion = Version.Parse(previousMigration.ToVersion);
+            
+            if (fromVersion != expectedVersion)
+            {
+                throw new InvalidOperationException(
+                    $"Invalid migration sequence. Expected migration from version {expectedVersion} but got {fromVersion}");
+            }
+
+            // Validate version increment
+            var toVersion = Version.Parse(record.ToVersion);
+            if (toVersion <= fromVersion)
+            {
+                throw new InvalidOperationException(
+                    $"Invalid version increment. New version {toVersion} must be greater than {fromVersion}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Validates integrity of dependent configurations
+    /// </summary>
+    private ValidationResult ValidateDependencyIntegrity(string section, string targetVersion)
+    {
+        var errors = new List<string>();
+        
+        if (_versionDependencies.TryGetValue(section, out var dependencies))
+        {
+            foreach (var dependency in dependencies)
+            {
+                var dependencyVersion = GetCurrentVersion(dependency);
+                if (!IsVersionCompatible(targetVersion, dependencyVersion))
+                {
+                    errors.Add($"Incompatible dependency version: {dependency} at version {dependencyVersion}");
+                }
+
+                // Check for breaking changes in dependency
+                var dependencyHistory = GetMigrationHistory(dependency)
+                    .Where(m => Version.Parse(m.ToVersion) > Version.Parse(dependencyVersion))
+                    .ToList();
+
+                if (dependencyHistory.Any(m => HasBreakingChanges(m)))
+                {
+                    errors.Add($"Breaking changes detected in dependency {dependency}");
+                }
+            }
+        }
+
+        return errors.Any() 
+            ? ValidationResult.Failed(errors.ToArray()) 
+            : ValidationResult.Success();
+    }
+
+    /// <summary>
+    /// Checks if a migration includes breaking changes
+    /// </summary>
+    private bool HasBreakingChanges(MigrationRecord migration)
+    {
+        var fromVersion = Version.Parse(migration.FromVersion);
+        var toVersion = Version.Parse(migration.ToVersion);
+        return toVersion.Major > fromVersion.Major;
+    }
+
+    /// <summary>
+    /// Gets metadata for a backup file
+    /// </summary>
+    private BackupMetadata? GetBackupMetadata(string? backupPath)
+    {
+        if (string.IsNullOrEmpty(backupPath))
+            return null;
+
+        var metadataPath = backupPath.Replace(".zip", "_metadata.json");
+        if (!File.Exists(metadataPath))
+            return null;
+
+        try
+        {
+            var json = File.ReadAllText(metadataPath);
+            return JsonSerializer.Deserialize<BackupMetadata>(json, _jsonOptions);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error reading backup metadata: {Path}", metadataPath);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Restores configuration from a backup file with compression support
     /// </summary>
     private async Task<T?> RestoreFromBackup<T>(string backupPath) where T : class
     {
@@ -226,8 +546,31 @@ public class ConfigurationMigrationManager : IConfigurationMigrationManager
             return null;
         }
 
-        var json = await File.ReadAllTextAsync(backupPath);
-        return JsonSerializer.Deserialize<T>(json, _jsonOptions);
+        try
+        {
+            if (backupPath.EndsWith(".zip"))
+            {
+                using var archive = ZipFile.OpenRead(backupPath);
+                var entry = archive.Entries.FirstOrDefault(e => e.Name.EndsWith(".json"));
+                if (entry == null)
+                    return null;
+
+                using var stream = entry.Open();
+                using var reader = new StreamReader(stream);
+                var json = await reader.ReadToEndAsync();
+                return JsonSerializer.Deserialize<T>(json, _jsonOptions);
+            }
+            else
+            {
+                var json = await File.ReadAllTextAsync(backupPath);
+                return JsonSerializer.Deserialize<T>(json, _jsonOptions);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error restoring from backup: {Path}", backupPath);
+            return null;
+        }
     }
 
     /// <summary>
@@ -235,19 +578,30 @@ public class ConfigurationMigrationManager : IConfigurationMigrationManager
     /// </summary>
     private void RecordMigration(MigrationRecord record)
     {
-        // Validate version sequence integrity
-        var previousMigration = GetMigrationHistory(record.ConfigSection).FirstOrDefault();
-        if (previousMigration != null)
-        {
-            if (Version.Parse(record.FromVersion) != Version.Parse(previousMigration.ToVersion))
-            {
-                throw new InvalidOperationException(
-                    $"Invalid migration sequence. Expected migration from version {previousMigration.ToVersion} but got {record.FromVersion}");
-            }
-        }
-
+        ValidateVersionSequence(record);
         _migrationHistory.Add(record);
         SaveMigrationHistory();
+        
+        // Create migration health report
+        var report = new
+        {
+            Timestamp = DateTime.UtcNow,
+            Section = record.ConfigSection,
+            FromVersion = record.FromVersion,
+            ToVersion = record.ToVersion,
+            Success = record.Success,
+            BackupInfo = GetBackupMetadata(record.BackupPath),
+            Dependencies = GetDependencyVersions(record.ConfigSection),
+            VersionSequence = GetMigrationHistory(record.ConfigSection)
+                .Take(5)
+                .Select(m => new { m.FromVersion, m.ToVersion, m.MigrationDate })
+                .ToList()
+        };
+
+        var reportPath = Path.Combine(_backupPath, "health_reports", 
+            $"migration_report_{record.ConfigSection}_{DateTime.UtcNow:yyyyMMddHHmmss}.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
+        File.WriteAllText(reportPath, JsonSerializer.Serialize(report, _jsonOptions));
     }
 
     /// <summary>

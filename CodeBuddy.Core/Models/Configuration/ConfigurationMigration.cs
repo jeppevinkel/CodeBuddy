@@ -1,8 +1,44 @@
 using System;
 using System.Collections.Generic;
+using System.IO.Compression;
 
 namespace CodeBuddy.Core.Models.Configuration
 {
+    /// <summary>
+    /// Snapshot of configuration state for rollback purposes
+    /// </summary>
+    public class ConfigurationSnapshot
+    {
+        public Dictionary<string, object> Configurations { get; set; } = new();
+        public Dictionary<string, string> Versions { get; set; } = new();
+        public DateTime CreatedAt { get; set; }
+        public string? Description { get; set; }
+    }
+
+    /// <summary>
+    /// Details about a configuration backup
+    /// </summary>
+    public class BackupMetadata
+    {
+        public string BackupPath { get; set; } = "";
+        public DateTime CreatedAt { get; set; }
+        public string Environment { get; set; } = "";
+        public Dictionary<string, string> Dependencies { get; set; } = new();
+        public bool IsCompressed { get; set; }
+        public long OriginalSize { get; set; }
+        public long CompressedSize { get; set; }
+    }
+
+    /// <summary>
+    /// Pre-migration validation context
+    /// </summary>
+    public class PreMigrationContext
+    {
+        public Dictionary<string, object> CurrentConfigurations { get; set; } = new();
+        public Dictionary<string, string> TargetVersions { get; set; } = new();
+        public Dictionary<string, List<string>> Dependencies { get; set; } = new();
+    }
+
     /// <summary>
     /// Record of a configuration migration
     /// </summary>
