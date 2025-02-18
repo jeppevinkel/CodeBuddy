@@ -23,11 +23,14 @@ namespace CodeBuddy.Core.Implementation.Documentation
         private readonly CodeExampleValidator _exampleValidator;
         private readonly DocumentationAnalyzer _docAnalyzer;
         private readonly CrossReferenceGenerator _crossRefGenerator;
+        private readonly DocumentationVersionManager _versionManager;
+        private readonly TemplateManager _templateManager;
 
         public DocumentationGenerator(
             IConfigurationManager configManager,
             IPluginManager pluginManager,
-            IFileOperations fileOps)
+            IFileOperations fileOps,
+            ITemplateManager templateManager = null)
         {
             _configManager = configManager;
             _pluginManager = pluginManager;
@@ -38,6 +41,8 @@ namespace CodeBuddy.Core.Implementation.Documentation
             _exampleValidator = new CodeExampleValidator();
             _docAnalyzer = new DocumentationAnalyzer();
             _crossRefGenerator = new CrossReferenceGenerator();
+            _versionManager = new DocumentationVersionManager(fileOps);
+            _templateManager = templateManager ?? new TemplateManager(fileOps);
         }
 
         /// <summary>
@@ -509,14 +514,79 @@ namespace CodeBuddy.Core.Implementation.Documentation
 
         private async Task GenerateMarkdownFiles(DocumentationResult result)
         {
-            // Generate API markdown documentation
+            // Create version for new documentation
+            var version = await _versionManager.CreateVersionAsync(
+                result.Version ?? DateTime.UtcNow.ToString("yyyyMMdd.HHmmss"),
+                "Generated documentation update");
+
+            // Generate main documentation files
+            await _fileOps.WriteFileAsync("docs/README.md", await GenerateMainReadmeAsync(result));
+            await _fileOps.WriteFileAsync("docs/ARCHITECTURE.md", await GenerateArchitectureDocAsync(result));
+            await _fileOps.WriteFileAsync("docs/CONTRIBUTING.md", await GenerateContributingGuideAsync());
+
+            // Generate API documentation
             await _fileOps.WriteFileAsync("docs/api/overview.md", GenerateApiOverviewMarkdown(result));
             foreach (var type in result.Types)
             {
-                await _fileOps.WriteFileAsync(
-                    $"docs/api/{type.Namespace?.Replace(".", "/")}/{type.Name}.md",
-                    GenerateTypeMarkdown(type));
+                var path = $"docs/api/{type.Namespace?.Replace(".", "/")}/{type.Name}.md";
+                await _fileOps.EnsureDirectoryExistsAsync(Path.GetDirectoryName(path));
+                await _fileOps.WriteFileAsync(path, GenerateTypeMarkdown(type));
             }
+
+            // Generate conceptual documentation
+            await _fileOps.WriteFileAsync("docs/concepts/validation-pipeline.md", GenerateValidationPipelineDoc(result));
+            await _fileOps.WriteFileAsync("docs/concepts/plugin-system.md", GeneratePluginSystemDoc(result));
+            await _fileOps.WriteFileAsync("docs/concepts/resource-management.md", GenerateResourceManagementDoc(result));
+
+            // Generate architecture decision records
+            var adrTemplate = await _templateManager.GetTemplateAsync("adr");
+            foreach (var decision in result.ArchitectureDecisions)
+            {
+                var adrPath = $"docs/adr/{decision.Date:yyyyMMdd}-{decision.Title.ToLower().Replace(" ", "-")}.md";
+                var adrContent = adrTemplate.Replace("{{title}}", decision.Title)
+                                         .Replace("{{date}}", decision.Date.ToString("yyyy-MM-dd"))
+                                         .Replace("{{status}}", decision.Status)
+                                         .Replace("{{context}}", decision.Context)
+                                         .Replace("{{decision}}", decision.Decision)
+                                         .Replace("{{consequences}}", decision.Consequences);
+                await _fileOps.WriteFileAsync(adrPath, adrContent);
+            }
+
+            // Generate search index
+            var searchIndex = GenerateSearchIndex(result);
+            await _fileOps.WriteFileAsync("docs/search-index.json", 
+                System.Text.Json.JsonSerializer.Serialize(searchIndex, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+
+            // Create documentation map
+            var docMap = new DocumentationMap
+            {
+                Version = version.Version,
+                Generated = DateTime.UtcNow,
+                Categories = new Dictionary<string, List<DocFile>>
+                {
+                    ["API"] = result.Types.Select(t => new DocFile 
+                    { 
+                        Path = $"api/{t.Namespace?.Replace(".", "/")}/{t.Name}.md",
+                        Title = t.Name,
+                        Description = t.Description
+                    }).ToList(),
+                    ["Concepts"] = new List<DocFile>
+                    {
+                        new DocFile { Path = "concepts/validation-pipeline.md", Title = "Validation Pipeline" },
+                        new DocFile { Path = "concepts/plugin-system.md", Title = "Plugin System" },
+                        new DocFile { Path = "concepts/resource-management.md", Title = "Resource Management" }
+                    },
+                    ["Architecture"] = result.ArchitectureDecisions.Select(d => new DocFile
+                    {
+                        Path = $"adr/{d.Date:yyyyMMdd}-{d.Title.ToLower().Replace(" ", "-")}.md",
+                        Title = d.Title,
+                        Description = d.Context
+                    }).ToList()
+                }
+            };
+
+            await _fileOps.WriteFileAsync("docs/doc-map.json",
+                System.Text.Json.JsonSerializer.Serialize(docMap, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         }
 
         private async Task GeneratePluginMarkdownFiles(DocumentationResult result)
@@ -550,14 +620,150 @@ namespace CodeBuddy.Core.Implementation.Documentation
 
         private string GenerateApiOverviewMarkdown(DocumentationResult result)
         {
-            // Generate API overview markdown
-            return string.Empty;
+            var builder = new System.Text.StringBuilder();
+            
+            builder.AppendLine("# API Documentation");
+            builder.AppendLine();
+            builder.AppendLine("## Overview");
+            builder.AppendLine();
+            builder.AppendLine("This section contains comprehensive documentation for the CodeBuddy API.");
+            builder.AppendLine();
+            
+            // Add namespace summary
+            var namespaces = result.Types
+                .GroupBy(t => t.Namespace)
+                .OrderBy(g => g.Key);
+
+            builder.AppendLine("## Namespaces");
+            builder.AppendLine();
+            
+            foreach (var ns in namespaces)
+            {
+                builder.AppendLine($"### {ns.Key}");
+                builder.AppendLine();
+                
+                // List types in namespace
+                foreach (var type in ns.OrderBy(t => t.Name))
+                {
+                    builder.AppendLine($"- [{type.Name}]({type.Name}.md): {type.Description}");
+                }
+                builder.AppendLine();
+            }
+
+            // Add quick links to common types
+            builder.AppendLine("## Common Types");
+            builder.AppendLine();
+            var commonTypes = result.Types
+                .Where(t => t.Name.Contains("Validator") || 
+                           t.Name.Contains("Manager") ||
+                           t.Name.Contains("Service"))
+                .OrderBy(t => t.Name);
+
+            foreach (var type in commonTypes)
+            {
+                builder.AppendLine($"- [{type.Name}]({type.Namespace?.Replace(".", "/")}/{type.Name}.md)");
+            }
+
+            return builder.ToString();
         }
 
         private string GenerateTypeMarkdown(TypeDocumentation type)
         {
-            // Generate type-specific markdown
-            return string.Empty;
+            var builder = new System.Text.StringBuilder();
+            
+            // Header
+            builder.AppendLine($"# {type.Name}");
+            builder.AppendLine();
+            builder.AppendLine($"**Namespace:** {type.Namespace}");
+            builder.AppendLine();
+            
+            // Description
+            if (!string.IsNullOrEmpty(type.Description))
+            {
+                builder.AppendLine(type.Description);
+                builder.AppendLine();
+            }
+
+            // Inheritance
+            if (type.Interfaces?.Any() == true)
+            {
+                builder.AppendLine("## Implements");
+                builder.AppendLine();
+                foreach (var iface in type.Interfaces)
+                {
+                    builder.AppendLine($"- {iface}");
+                }
+                builder.AppendLine();
+            }
+
+            // Properties
+            if (type.Properties?.Any() == true)
+            {
+                builder.AppendLine("## Properties");
+                builder.AppendLine();
+                builder.AppendLine("| Name | Type | Description |");
+                builder.AppendLine("|------|------|-------------|");
+                foreach (var prop in type.Properties)
+                {
+                    builder.AppendLine($"| {prop.Name} | {prop.Type} | {prop.Description} |");
+                }
+                builder.AppendLine();
+            }
+
+            // Methods
+            if (type.Methods?.Any() == true)
+            {
+                builder.AppendLine("## Methods");
+                builder.AppendLine();
+                
+                foreach (var method in type.Methods)
+                {
+                    builder.AppendLine($"### {method.Name}");
+                    builder.AppendLine();
+                    
+                    if (!string.IsNullOrEmpty(method.Description))
+                    {
+                        builder.AppendLine(method.Description);
+                        builder.AppendLine();
+                    }
+
+                    // Parameters
+                    if (method.Parameters?.Any() == true)
+                    {
+                        builder.AppendLine("#### Parameters");
+                        builder.AppendLine();
+                        builder.AppendLine("| Name | Type | Description |");
+                        builder.AppendLine("|------|------|-------------|");
+                        foreach (var param in method.Parameters)
+                        {
+                            builder.AppendLine($"| {param.Name} | {param.Type} | {param.Description} |");
+                        }
+                        builder.AppendLine();
+                    }
+
+                    // Return type
+                    builder.AppendLine("#### Returns");
+                    builder.AppendLine();
+                    builder.AppendLine($"{method.ReturnType}");
+                    builder.AppendLine();
+
+                    // Examples
+                    if (method.Examples?.Any() == true)
+                    {
+                        builder.AppendLine("#### Examples");
+                        builder.AppendLine();
+                        foreach (var example in method.Examples)
+                        {
+                            builder.AppendLine($"```{example.Language}");
+                            builder.AppendLine(example.Code);
+                            builder.AppendLine("```");
+                            builder.AppendLine();
+                        }
+                    }
+                }
+            }
+
+            return builder.ToString();
         }
 
         private string GeneratePluginOverviewMarkdown(DocumentationResult result)
