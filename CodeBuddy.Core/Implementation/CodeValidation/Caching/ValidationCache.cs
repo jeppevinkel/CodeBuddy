@@ -18,6 +18,9 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Caching
         private readonly ConcurrentDictionary<string, CacheEntry> _cache;
         private readonly ValidationCacheStats _stats;
         private readonly IValidationCacheMonitor _monitor;
+        private readonly ICacheEvictionStrategy _evictionStrategy;
+        private readonly ConcurrentDictionary<string, CacheEntryMetadata> _entryMetadata;
+        private readonly Timer _adaptiveAdjustmentTimer;
 
         public ValidationCache(
             IOptions<ValidationCacheConfig> config,
@@ -27,6 +30,32 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Caching
             _cache = new ConcurrentDictionary<string, CacheEntry>();
             _stats = new ValidationCacheStats();
             _monitor = monitor;
+            _entryMetadata = new ConcurrentDictionary<string, CacheEntryMetadata>();
+            
+            // Initialize eviction strategy
+            _evictionStrategy = CreateEvictionStrategy(_config.EvictionStrategy);
+            
+            // Start adaptive adjustment timer if enabled
+            if (_config.EnableAdaptiveCaching)
+            {
+                _adaptiveAdjustmentTimer = new Timer(
+                    AdaptiveCacheAdjustment,
+                    null,
+                    TimeSpan.FromMinutes(_config.AdaptiveAdjustmentIntervalMinutes),
+                    TimeSpan.FromMinutes(_config.AdaptiveAdjustmentIntervalMinutes));
+            }
+        }
+
+        private ICacheEvictionStrategy CreateEvictionStrategy(CacheEvictionStrategy strategy)
+        {
+            return strategy switch
+            {
+                CacheEvictionStrategy.LRU => new LRUEvictionStrategy(),
+                CacheEvictionStrategy.LFU => new LFUEvictionStrategy(),
+                CacheEvictionStrategy.FIFO => new FIFOEvictionStrategy(),
+                CacheEvictionStrategy.WeightedCombination => new WeightedCombinationStrategy(),
+                _ => new WeightedCombinationStrategy() // Default to weighted combination
+            };
         }
 
         public async Task<(bool found, ValidationResult result)> TryGetAsync(string codeHash, ValidationOptions options)
@@ -43,14 +72,18 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Caching
                     {
                         _stats.CacheHits++;
                         found = true;
+                        await _evictionStrategy.RecordAccessAsync(key, true);
+                        UpdateEntryMetadata(key, true);
                         return (true, entry.Result);
                     }
                     
                     // Entry expired
-                    _cache.TryRemove(key, out _);
+                    await RemoveEntry(key);
                 }
 
                 _stats.CacheMisses++;
+                await _evictionStrategy.RecordAccessAsync(key, false);
+                UpdateEntryMetadata(key, false);
                 return (false, null);
             }
             finally
@@ -175,19 +208,89 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Caching
 
         private async Task EnforceCacheLimits()
         {
-            while (_cache.Count > _config.MaxEntries || EstimateCacheSize() > _config.MaxCacheSizeMB * 1024 * 1024)
+            var currentSize = EstimateCacheSize();
+            var maxSize = _config.MaxCacheSizeMB * 1024 * 1024;
+            var memoryPressure = (double)currentSize / maxSize * 100;
+
+            // Check if we need to evict entries
+            if (_cache.Count > _config.MaxEntries || currentSize > maxSize)
             {
-                // Remove oldest entries first
-                var oldestEntry = _cache.OrderBy(kvp => kvp.Value.CreatedAt).FirstOrDefault();
-                if (!string.IsNullOrEmpty(oldestEntry.Key))
+                var entriesToRemove = Math.Max(
+                    _cache.Count - _config.MaxEntries,
+                    (int)((currentSize - maxSize) / (currentSize / _cache.Count))
+                );
+
+                var evictionCandidates = await _evictionStrategy.SelectEntriesForEvictionAsync(
+                    entriesToRemove,
+                    _entryMetadata
+                );
+
+                foreach (var key in evictionCandidates)
                 {
-                    _cache.TryRemove(oldestEntry.Key, out _);
-                }
-                else
-                {
-                    break;
+                    await RemoveEntry(key);
                 }
             }
+
+            // Adaptive cache size adjustment
+            if (_config.EnableAdaptiveCaching && memoryPressure > _config.MemoryPressureThresholdPercent)
+            {
+                _config.MaxEntries = (int)(_config.MaxEntries * 0.9); // Reduce by 10%
+                await _monitor.RecordOperationMetricsAsync("Cache_Size_Reduced", 0, true);
+            }
+        }
+
+        private async Task RemoveEntry(string key)
+        {
+            _cache.TryRemove(key, out _);
+            _entryMetadata.TryRemove(key, out _);
+            _stats.EvictionCount++;
+        }
+
+        private void UpdateEntryMetadata(string key, bool isHit)
+        {
+            var metadata = _entryMetadata.GetOrAdd(key, _ => new CacheEntryMetadata());
+            metadata.LastAccessedAt = DateTime.UtcNow;
+            metadata.AccessCount++;
+            metadata.ValidationCategory = "Default"; // This should be set based on validation type
+            metadata.Priority = 1; // This should be set based on validation importance
+        }
+
+        private async void AdaptiveCacheAdjustment(object state)
+        {
+            try
+            {
+                var stats = await GetStatsAsync();
+                var hitRatio = stats.HitRatio;
+
+                if (hitRatio < _config.AdaptiveHitRatioThreshold)
+                {
+                    // If hit ratio is too low, increase cache size
+                    _config.MaxEntries = (int)(_config.MaxEntries * 1.1); // Increase by 10%
+                    await _monitor.RecordOperationMetricsAsync("Cache_Size_Increased", 0, true);
+                }
+
+                // Update eviction strategy metrics
+                var strategyMetrics = await _evictionStrategy.GetMetricsAsync();
+                await _monitor.RecordStrategyMetricsAsync(_evictionStrategy.Name, strategyMetrics);
+
+                // Predictive preloading if enabled
+                if (_config.EnablePredictivePreloading)
+                {
+                    await PerformPredictivePreloading();
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log error but don't throw from timer callback
+                await _monitor.RecordOperationMetricsAsync("Cache_Adjustment_Error", 0, false);
+            }
+        }
+
+        private async Task PerformPredictivePreloading()
+        {
+            // This is a placeholder for actual implementation
+            // It should analyze access patterns and preload likely-to-be-needed entries
+            // The actual implementation would depend on your specific use case
         }
 
         private class CacheEntry
