@@ -1,54 +1,63 @@
+using System;
+using System.Collections.Generic;
 using CodeBuddy.Core.Models;
+using CodeBuddy.Core.Implementation.CodeValidation.Monitoring;
 
-namespace CodeBuddy.Core.Implementation.CodeValidation;
-
-public class ValidationContext
+namespace CodeBuddy.Core.Implementation.CodeValidation
 {
-    public string Code { get; set; }
-    public string Language { get; set; }
-    public ValidationOptions Options { get; set; }
-    public ICodeValidator Validator { get; set; }
-    public ValidationResult Result { get; set; }
-    
-    // Resilience tracking
-    public Dictionary<string, object> Items { get; } = new();
-    public CancellationToken CancellationToken { get; set; }
-    public DateTime StartTime { get; set; }
-    public ValidationResilienceConfig ResilienceConfig { get; set; }
-
-    public ValidationContext(
-        string code,
-        string language,
-        ValidationOptions options,
-        ICodeValidator validator,
-        ValidationResilienceConfig resilienceConfig = null)
+    public class ValidationContext
     {
-        Code = code;
-        Language = language;
-        Options = options;
-        Validator = validator;
-        Result = new ValidationResult();
-        StartTime = DateTime.UtcNow;
-        ResilienceConfig = resilienceConfig ?? new ValidationResilienceConfig();
+        public ICodeValidator Validator { get; set; }
+        public string Code { get; set; }
+        public string Language { get; set; }
+        public ValidationOptions Options { get; set; }
+        public MetricsCollection Metrics { get; } = new MetricsCollection();
+        public ValidationResult Result { get; set; } = new ValidationResult();
     }
 
-    public T GetItem<T>(string key) where T : class
+    public class MetricsCollection
     {
-        return Items.TryGetValue(key, out var value) ? value as T : null;
-    }
+        private readonly Dictionary<string, StepMetrics> _stepMetrics = new();
+        private readonly List<ResourceSnapshot> _resourceSnapshots = new();
 
-    public void SetItem<T>(string key, T value) where T : class
-    {
-        Items[key] = value;
-    }
-
-    public void TrackMiddlewareExecution(string middlewareName, TimeSpan duration)
-    {
-        if (Result.RecoveryStats.DetectedPatterns == null)
+        public void RecordStepStart(string step)
         {
-            Result.RecoveryStats.DetectedPatterns = new List<FailurePattern>();
+            _stepMetrics[step] = new StepMetrics { StartTime = DateTime.UtcNow };
         }
 
-        Result.RecoveryStats.PerformanceImpactMs += duration.TotalMilliseconds;
+        public void RecordStepEnd(string step, bool success)
+        {
+            if (_stepMetrics.TryGetValue(step, out var metrics))
+            {
+                metrics.EndTime = DateTime.UtcNow;
+                metrics.Success = success;
+            }
+        }
+
+        public void RecordResourceSnapshot(ResourceMetrics metrics)
+        {
+            _resourceSnapshots.Add(new ResourceSnapshot
+            {
+                Timestamp = DateTime.UtcNow,
+                Metrics = metrics
+            });
+        }
+
+        public IReadOnlyDictionary<string, StepMetrics> GetStepMetrics() => _stepMetrics;
+        public IReadOnlyList<ResourceSnapshot> GetResourceSnapshots() => _resourceSnapshots;
+    }
+
+    public class StepMetrics
+    {
+        public DateTime StartTime { get; set; }
+        public DateTime? EndTime { get; set; }
+        public bool Success { get; set; }
+        public TimeSpan Duration => EndTime?.Subtract(StartTime) ?? TimeSpan.Zero;
+    }
+
+    public class ResourceSnapshot
+    {
+        public DateTime Timestamp { get; set; }
+        public ResourceMetrics Metrics { get; set; }
     }
 }

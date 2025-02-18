@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using CodeBuddy.Core.Models;
+using CodeBuddy.Core.Implementation.CodeValidation.Monitoring;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation;
 
@@ -12,16 +13,19 @@ public class ValidationPipeline
     private readonly ConcurrentDictionary<string, CircuitBreakerState> _circuitBreakers;
     private readonly ConcurrentDictionary<string, MiddlewareMetrics> _metrics;
     private readonly ValidationResilienceConfig _config;
+    private readonly IMetricsAggregator _metricsAggregator;
 
     public ValidationPipeline(
         ILogger<ValidationPipeline> logger,
-        ValidationResilienceConfig config)
+        ValidationResilienceConfig config,
+        IMetricsAggregator metricsAggregator)
     {
         _logger = logger;
         _middleware = new List<IValidationMiddleware>();
         _circuitBreakers = new ConcurrentDictionary<string, CircuitBreakerState>();
         _metrics = new ConcurrentDictionary<string, MiddlewareMetrics>();
         _config = config;
+        _metricsAggregator = metricsAggregator;
     }
 
     public void AddMiddleware(IValidationMiddleware middleware)
@@ -104,14 +108,19 @@ public class ValidationPipeline
                         
                         // Success - reset failure count
                         ResetFailureCount(middleware.Name);
-                        RecordSuccess(middleware.Name, DateTime.UtcNow - startTime);
+                        var duration = DateTime.UtcNow - startTime;
+                        RecordSuccess(middleware.Name, duration);
+                        _metricsAggregator.RecordMiddlewareExecution(middleware.Name, true, duration);
                         
                         return result;
                     }
                     catch (Exception ex)
                     {
                         attempts++;
+                        var duration = DateTime.UtcNow - startTime;
                         var failure = RecordFailure(middleware.Name, ex);
+                        _metricsAggregator.RecordMiddlewareExecution(middleware.Name, false, duration);
+                        _metricsAggregator.RecordRetryAttempt(middleware.Name);
                         ctx.Result.FailedMiddleware.Add(failure);
 
                         if (IsCircuitBreakerTripped(middleware.Name))
@@ -218,6 +227,7 @@ public class ValidationPipeline
                 {
                     s.IsOpen = true;
                     s.ResetTime = DateTime.UtcNow.Add(_config.CircuitBreakerResetTime);
+                    _metricsAggregator.RecordCircuitBreakerStatus(middlewareName, true);
                 }
                 return s;
             });
@@ -287,5 +297,39 @@ public class ValidationPipeline
         public int TotalFailures { get; set; }
         public int TotalSuccesses { get; set; }
         public TimeSpan LastSuccessfulDuration { get; set; }
+    }
+
+    private void EmitResourceMetrics()
+    {
+        var metrics = new ResourceMetrics
+        {
+            CpuUsagePercent = GetCpuUsage(),
+            MemoryUsageMB = GetMemoryUsage(),
+            DiskIoMBPS = GetDiskIoRate(),
+            ActiveThreads = GetActiveThreadCount()
+        };
+        _metricsAggregator.RecordResourceUtilization(metrics);
+    }
+
+    private double GetCpuUsage()
+    {
+        return System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime.TotalMilliseconds /
+               (Environment.ProcessorCount * DateTime.UtcNow.Subtract(Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalMilliseconds) * 100;
+    }
+
+    private double GetMemoryUsage()
+    {
+        return System.Diagnostics.Process.GetCurrentProcess().WorkingSet64 / (1024.0 * 1024.0);
+    }
+
+    private double GetDiskIoRate()
+    {
+        var process = System.Diagnostics.Process.GetCurrentProcess();
+        return (process.ReadBytes + process.WriteBytes) / (1024.0 * 1024.0);
+    }
+
+    private int GetActiveThreadCount()
+    {
+        return System.Diagnostics.Process.GetCurrentProcess().Threads.Count;
     }
 }
