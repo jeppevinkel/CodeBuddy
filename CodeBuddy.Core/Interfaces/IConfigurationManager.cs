@@ -18,7 +18,7 @@ namespace CodeBuddy.Core.Interfaces
         /// <param name="migrationId">Optional migration ID if changes are part of a migration</param>
         /// <param name="affectedComponents">Optional list of components affected by the changes</param>
         /// <returns>True if changes were applied successfully, false otherwise</returns>
-        Task<bool> UpdateConfigurationAsync(
+        Task<(bool Success, List<string> Errors)> UpdateConfigurationAsync(
             Dictionary<string, object> changes,
             string reason = null,
             string migrationId = null,

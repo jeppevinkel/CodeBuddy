@@ -9,11 +9,13 @@ namespace CodeBuddy.Core.Implementation
     public class ConfigurationManager : IConfigurationManager
     {
         private readonly IConfigurationVersionHistoryStorage _versionHistoryStorage;
+        private readonly ConfigurationTransitionValidator _transitionValidator;
         private readonly string _currentUser;
         private Dictionary<string, object> _currentConfig;
 
         public ConfigurationManager(
             IConfigurationVersionHistoryStorage versionHistoryStorage,
+            ConfigurationTransitionValidator transitionValidator,
             string currentUser = "system")
         {
             _versionHistoryStorage = versionHistoryStorage;
@@ -21,7 +23,7 @@ namespace CodeBuddy.Core.Implementation
             _currentConfig = new Dictionary<string, object>();
         }
 
-        public async Task<bool> UpdateConfigurationAsync(
+        public async Task<(bool Success, List<string> Errors)> UpdateConfigurationAsync(
             Dictionary<string, object> changes,
             string reason = null,
             string migrationId = null,
@@ -32,10 +34,31 @@ namespace CodeBuddy.Core.Implementation
                 // Create a copy of the current configuration
                 var previousConfig = new Dictionary<string, object>(_currentConfig);
 
+                // Validate the transition
+                var (isValid, errors) = _transitionValidator.ValidateTransition(
+                    previousConfig,
+                    changes,
+                    migrationId);
+
+                if (!isValid)
+                {
+                    return (false, errors);
+                }
+
                 // Apply changes
                 foreach (var change in changes)
                 {
                     _currentConfig[change.Key] = change.Value;
+                }
+
+                // Validate referential integrity
+                var (integrityValid, integrityErrors) = _transitionValidator.ValidateReferentialIntegrity(_currentConfig);
+                
+                if (!integrityValid)
+                {
+                    // Rollback changes if integrity validation fails
+                    _currentConfig = previousConfig;
+                    return (false, integrityErrors);
                 }
 
                 // Create version history entry

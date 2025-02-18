@@ -15,8 +15,10 @@ namespace CodeBuddy.Core.Implementation.Configuration
     public class FileBasedVersionHistoryStorage : IConfigurationVersionHistoryStorage
     {
         private readonly string _storageDirectory;
+        private readonly string _compressedDirectory;
         private readonly JsonSerializerOptions _jsonOptions;
         private readonly SemaphoreSlim _lock = new SemaphoreSlim(1, 1);
+        private const int COMPRESSION_AGE_DAYS = 30;
 
         public FileBasedVersionHistoryStorage(string storageDirectory)
         {
@@ -26,9 +28,15 @@ namespace CodeBuddy.Core.Implementation.Configuration
                 WriteIndented = true
             };
 
+            _compressedDirectory = Path.Combine(_storageDirectory, "compressed");
+            
             if (!Directory.Exists(_storageDirectory))
             {
                 Directory.CreateDirectory(_storageDirectory);
+            }
+            if (!Directory.Exists(_compressedDirectory))
+            {
+                Directory.CreateDirectory(_compressedDirectory);
             }
         }
 
@@ -70,13 +78,24 @@ namespace CodeBuddy.Core.Implementation.Configuration
         public async Task<ConfigurationVersionHistory> GetVersionAsync(string versionId)
         {
             string filePath = GetVersionFilePath(versionId);
-            if (!File.Exists(filePath))
+            string compressedPath = GetCompressedFilePath(versionId);
+            
+            if (File.Exists(filePath))
             {
-                return null;
+                string json = await File.ReadAllTextAsync(filePath);
+                return JsonSerializer.Deserialize<ConfigurationVersionHistory>(json, _jsonOptions);
             }
-
-            string json = await File.ReadAllTextAsync(filePath);
-            return JsonSerializer.Deserialize<ConfigurationVersionHistory>(json, _jsonOptions);
+            else if (File.Exists(compressedPath))
+            {
+                using var compressedStream = File.OpenRead(compressedPath);
+                using var decompressStream = new System.IO.Compression.GZipStream(
+                    compressedStream, System.IO.Compression.CompressionMode.Decompress);
+                using var reader = new StreamReader(decompressStream);
+                string json = await reader.ReadToEndAsync();
+                return JsonSerializer.Deserialize<ConfigurationVersionHistory>(json, _jsonOptions);
+            }
+            
+            return null;
         }
 
         public async Task<List<ConfigurationVersionHistory>> ListVersionsAsync(DateTime startTime, DateTime endTime)
@@ -124,16 +143,46 @@ namespace CodeBuddy.Core.Implementation.Configuration
             await _lock.WaitAsync();
             try
             {
-                var cutoffDate = DateTime.UtcNow.AddDays(-retentionDays);
+                var compressionDate = DateTime.UtcNow.AddDays(-COMPRESSION_AGE_DAYS);
+                var deletionDate = DateTime.UtcNow.AddDays(-retentionDays);
                 var versions = await LoadVersionIndexAsync();
 
-                var versionsToRemove = versions.Where(v => v.Timestamp < cutoffDate).ToList();
+                // Compress old versions
+                var versionsToCompress = versions
+                    .Where(v => v.Timestamp < compressionDate && v.Timestamp >= deletionDate)
+                    .ToList();
+
+                foreach (var version in versionsToCompress)
+                {
+                    string filePath = GetVersionFilePath(version.VersionId);
+                    string compressedPath = GetCompressedFilePath(version.VersionId);
+                    
+                    if (File.Exists(filePath) && !File.Exists(compressedPath))
+                    {
+                        string json = await File.ReadAllTextAsync(filePath);
+                        using var compressedFile = File.Create(compressedPath);
+                        using var compressStream = new System.IO.Compression.GZipStream(
+                            compressedFile, System.IO.Compression.CompressionMode.Compress);
+                        using var writer = new StreamWriter(compressStream);
+                        await writer.WriteAsync(json);
+                        File.Delete(filePath);
+                    }
+                }
+
+                // Delete old versions
+                var versionsToRemove = versions.Where(v => v.Timestamp < deletionDate).ToList();
                 foreach (var version in versionsToRemove)
                 {
                     string filePath = GetVersionFilePath(version.VersionId);
+                    string compressedPath = GetCompressedFilePath(version.VersionId);
+                    
                     if (File.Exists(filePath))
                     {
                         File.Delete(filePath);
+                    }
+                    if (File.Exists(compressedPath))
+                    {
+                        File.Delete(compressedPath);
                     }
                 }
 
@@ -144,6 +193,11 @@ namespace CodeBuddy.Core.Implementation.Configuration
             {
                 _lock.Release();
             }
+        }
+
+        private string GetCompressedFilePath(string versionId)
+        {
+            return Path.Combine(_compressedDirectory, $"version_{versionId}.json.gz");
         }
 
         private string GetVersionFilePath(string versionId)
