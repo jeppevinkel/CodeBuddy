@@ -1,0 +1,34 @@
+name: Build CLI
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: 8.0.x
+        
+    - name: Restore dependencies
+      run: dotnet restore
+      
+    - name: Build
+      run: dotnet build --no-restore --configuration Release
+      
+    - name: Build CLI
+      run: dotnet publish CodeBuddy.CLI/CodeBuddy.CLI.csproj -c Release -o publish
+      
+    - name: Upload CLI artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: codebuddy-cli
+        path: publish/
