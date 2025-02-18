@@ -19,7 +19,7 @@ namespace CodeBuddy.CLI
                 services.AddLogging(builder =>
                 {
                     builder.AddConsole();
-                    builder.AddFile("codebuddy-cli.log");
+                    builder.AddFile("logs/codebuddy-cli.log");
                 });
                 
                 var serviceProvider = services.BuildServiceProvider();
