@@ -1110,6 +1110,14 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
         }
     }
 
+    /// <summary>
+    /// Gets the current validation queue depth.
+    /// </summary>
+    public int GetQueueDepth()
+    {
+        return _validationQueue?.Count ?? 0;
+    }
+
     private void CheckPerformanceThresholds(ValidationResult result, ValidationOptions options)
     {
         if (options.PerformanceThresholds == null) return;
