@@ -1,176 +1,118 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
-using System.Linq;
 using CodeBuddy.Core.Models;
+using CodeBuddy.Core.Models.Analytics;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation.Analytics
 {
     public interface IResourceAnalytics
     {
         Task StoreResourceUsageDataAsync(ResourceUsageData data);
-        Task<ResourceUsageReport> GenerateReportAsync(TimeSpan period);
-        Task<IEnumerable<ResourceOptimizationRecommendation>> GetOptimizationRecommendationsAsync();
-        Task<ResourceUsageTrends> AnalyzeUsageTrendsAsync();
-        Task<IEnumerable<ResourceBottleneck>> IdentifyBottlenecksAsync();
+        Task StoreResponseTimeDataAsync(ResponseTimeData data);
+        Task<List<ResourceBottleneck>> IdentifyBottlenecksAsync();
     }
 
     public class ResourceAnalytics : IResourceAnalytics
     {
-        private readonly ITimeSeriesStorage _timeSeriesStorage;
-        private readonly IMetricsAggregator _metricsAggregator;
-        private readonly IResourceAlertManager _resourceAlertManager;
+        private readonly TimeSeriesStorage _timeSeriesStorage;
 
-        public ResourceAnalytics(
-            ITimeSeriesStorage timeSeriesStorage,
-            IMetricsAggregator metricsAggregator,
-            IResourceAlertManager resourceAlertManager)
+        public ResourceAnalytics(TimeSeriesStorage timeSeriesStorage)
         {
             _timeSeriesStorage = timeSeriesStorage;
-            _metricsAggregator = metricsAggregator;
-            _resourceAlertManager = resourceAlertManager;
         }
 
         public async Task StoreResourceUsageDataAsync(ResourceUsageData data)
         {
-            await _timeSeriesStorage.StoreDataPointAsync(new TimeSeriesDataPoint
+            await _timeSeriesStorage.StoreTimeSeriesDataAsync("resource_usage", new Dictionary<string, double>
             {
-                Timestamp = DateTime.UtcNow,
-                Metrics = new Dictionary<string, double>
-                {
-                    { "CpuUsage", data.CpuUsagePercentage },
-                    { "MemoryUsage", data.MemoryUsageMB },
-                    { "DiskIORate", data.DiskIOBytesPerSecond },
-                    { "Gen0Size", data.Gen0SizeBytes },
-                    { "Gen1Size", data.Gen1SizeBytes },
-                    { "Gen2Size", data.Gen2SizeBytes },
-                    { "LohSize", data.LohSizeBytes },
-                    { "FinalizationQueueLength", data.FinalizationQueueLength },
-                    { "MemoryFragmentation", data.FragmentationPercent }
-                },
-                Tags = new Dictionary<string, string>
-                {
-                    { "PipelineId", data.PipelineId },
-                    { "ValidatorType", data.ValidatorType }
-                }
-            });
+                ["cpu_usage"] = data.CpuUsagePercentage,
+                ["memory_usage"] = data.MemoryUsageMB,
+                ["disk_io"] = data.DiskIOBytesPerSecond
+            }, data.Timestamp);
         }
 
-        public async Task<ResourceUsageReport> GenerateReportAsync(TimeSpan period)
+        public async Task StoreResponseTimeDataAsync(ResponseTimeData data)
         {
-            var endTime = DateTime.UtcNow;
-            var startTime = endTime - period;
-
-            var timeSeriesData = await _timeSeriesStorage.GetDataPointsAsync(startTime, endTime);
-            var aggregatedMetrics = await _metricsAggregator.AggregateMetricsAsync(timeSeriesData);
-            var throttlingEvents = await _resourceAlertManager.GetThrottlingEventsAsync(startTime, endTime);
-
-            return new ResourceUsageReport
+            await _timeSeriesStorage.StoreTimeSeriesDataAsync("response_time", new Dictionary<string, double>
             {
-                Period = period,
-                StartTime = startTime,
-                EndTime = endTime,
-                AverageMetrics = aggregatedMetrics,
-                ThrottlingEvents = throttlingEvents,
-                ResourceUtilization = CalculateResourceUtilization(timeSeriesData),
-                PerformanceMetrics = await CalculatePerformanceMetrics(timeSeriesData)
-            };
+                ["avg_response_time"] = data.AverageResponseTime,
+                ["p95_response_time"] = data.P95ResponseTime,
+                ["p99_response_time"] = data.P99ResponseTime,
+                ["slow_request_percentage"] = data.SlowRequestPercentage,
+                ["total_requests"] = data.TotalRequests,
+                ["slow_requests"] = data.SlowRequests
+            }, data.Timestamp);
         }
 
-        public async Task<IEnumerable<ResourceOptimizationRecommendation>> GetOptimizationRecommendationsAsync()
-        {
-            var recommendations = new List<ResourceOptimizationRecommendation>();
-            var recentData = await _timeSeriesStorage.GetDataPointsAsync(DateTime.UtcNow.AddDays(-7), DateTime.UtcNow);
-            
-            var usagePatterns = AnalyzeUsagePatterns(recentData);
-            foreach (var pattern in usagePatterns)
-            {
-                if (pattern.IndicatesInefficiency)
-                {
-                    recommendations.Add(new ResourceOptimizationRecommendation
-                    {
-                        ResourceType = pattern.ResourceType,
-                        CurrentUsage = pattern.CurrentUsage,
-                        RecommendedUsage = pattern.OptimalUsage,
-                        Impact = pattern.PotentialImpact,
-                        Justification = pattern.Analysis
-                    });
-                }
-            }
-
-            return recommendations;
-        }
-
-        public async Task<ResourceUsageTrends> AnalyzeUsageTrendsAsync()
-        {
-            var monthlyData = await _timeSeriesStorage.GetDataPointsAsync(DateTime.UtcNow.AddMonths(-1), DateTime.UtcNow);
-            
-            return new ResourceUsageTrends
-            {
-                CpuTrend = CalculateTrend(monthlyData.Select(d => d.Metrics["CpuUsage"])),
-                MemoryTrend = CalculateTrend(monthlyData.Select(d => d.Metrics["MemoryUsage"])),
-                DiskIOTrend = CalculateTrend(monthlyData.Select(d => d.Metrics["DiskIORate"])),
-                PredictedUsage = PredictFutureUsage(monthlyData)
-            };
-        }
-
-        public async Task<IEnumerable<ResourceBottleneck>> IdentifyBottlenecksAsync()
+        public async Task<List<ResourceBottleneck>> IdentifyBottlenecksAsync()
         {
             var bottlenecks = new List<ResourceBottleneck>();
-            var recentData = await _timeSeriesStorage.GetDataPointsAsync(DateTime.UtcNow.AddHours(-24), DateTime.UtcNow);
-            
-            // Analyze CPU bottlenecks
-            var cpuBottlenecks = AnalyzeResourceBottlenecks(recentData, "CpuUsage", 90.0);
-            bottlenecks.AddRange(cpuBottlenecks);
+            var resourceData = await _timeSeriesStorage.GetTimeSeriesDataAsync("resource_usage", TimeSpan.FromHours(1));
+            var responseTimeData = await _timeSeriesStorage.GetTimeSeriesDataAsync("response_time", TimeSpan.FromHours(1));
 
-            // Analyze Memory bottlenecks
-            var memoryBottlenecks = AnalyzeResourceBottlenecks(recentData, "MemoryUsage", 85.0);
-            bottlenecks.AddRange(memoryBottlenecks);
+            // Analyze CPU usage trends
+            if (resourceData.TryGetValue("cpu_usage", out var cpuTrend) && 
+                CalculateTrend(cpuTrend) > 0.1)
+            {
+                bottlenecks.Add(new ResourceBottleneck
+                {
+                    ResourceType = ResourceMetricType.CPU,
+                    Impact = "Increasing CPU usage trend detected",
+                    RecommendedAction = "Consider scaling out or optimizing CPU-intensive operations"
+                });
+            }
 
-            // Analyze Disk I/O bottlenecks
-            var diskBottlenecks = AnalyzeResourceBottlenecks(recentData, "DiskIORate", 80.0);
-            bottlenecks.AddRange(diskBottlenecks);
+            // Analyze memory usage trends
+            if (resourceData.TryGetValue("memory_usage", out var memoryTrend) && 
+                CalculateTrend(memoryTrend) > 0.1)
+            {
+                bottlenecks.Add(new ResourceBottleneck
+                {
+                    ResourceType = ResourceMetricType.Memory,
+                    Impact = "Increasing memory usage trend detected",
+                    RecommendedAction = "Check for memory leaks or consider increasing memory allocation"
+                });
+            }
+
+            // Analyze response time trends
+            if (responseTimeData.TryGetValue("avg_response_time", out var responseTrend) && 
+                CalculateTrend(responseTrend) > 0.1)
+            {
+                bottlenecks.Add(new ResourceBottleneck
+                {
+                    ResourceType = ResourceMetricType.ResponseTime,
+                    Impact = "Degrading response time trend detected",
+                    RecommendedAction = "Investigate performance bottlenecks and consider scaling resources"
+                });
+            }
 
             return bottlenecks;
         }
 
-        private ResourceUtilization CalculateResourceUtilization(IEnumerable<TimeSeriesDataPoint> data)
+        private double CalculateTrend(List<TimeSeriesDataPoint> dataPoints)
         {
-            // Implementation of resource utilization calculation
-            throw new NotImplementedException();
-        }
+            if (dataPoints.Count < 2)
+                return 0;
 
-        private async Task<PerformanceMetrics> CalculatePerformanceMetrics(IEnumerable<TimeSeriesDataPoint> data)
-        {
-            // Implementation of performance metrics calculation
-            throw new NotImplementedException();
-        }
+            // Simple linear regression
+            var n = dataPoints.Count;
+            var sumX = 0.0;
+            var sumY = 0.0;
+            var sumXY = 0.0;
+            var sumXX = 0.0;
 
-        private IEnumerable<UsagePattern> AnalyzeUsagePatterns(IEnumerable<TimeSeriesDataPoint> data)
-        {
-            // Implementation of usage pattern analysis
-            throw new NotImplementedException();
-        }
+            for (var i = 0; i < n; i++)
+            {
+                var x = i;
+                var y = dataPoints[i].Value;
+                sumX += x;
+                sumY += y;
+                sumXY += x * y;
+                sumXX += x * x;
+            }
 
-        private TrendAnalysis CalculateTrend(IEnumerable<double> values)
-        {
-            // Implementation of trend calculation
-            throw new NotImplementedException();
-        }
-
-        private PredictedResourceUsage PredictFutureUsage(IEnumerable<TimeSeriesDataPoint> historicalData)
-        {
-            // Implementation of usage prediction
-            throw new NotImplementedException();
-        }
-
-        private IEnumerable<ResourceBottleneck> AnalyzeResourceBottlenecks(
-            IEnumerable<TimeSeriesDataPoint> data,
-            string metricName,
-            double threshold)
-        {
-            // Implementation of bottleneck analysis
-            throw new NotImplementedException();
+            return (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
         }
     }
 }

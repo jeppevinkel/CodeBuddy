@@ -24,6 +24,7 @@ public class ValidationPipeline
     private readonly ConcurrentDictionary<string, int> _criticalValidationReservations;
     private volatile bool _isThrottled;
     private DateTime _lastThrottlingAdjustment;
+    private readonly ResponseTimeMonitor _responseTimeMonitor;
 
     public ValidationPipeline(
         ILogger<ValidationPipeline> logger,
@@ -48,6 +49,7 @@ public class ValidationPipeline
         _resourceHistory = new ConcurrentQueue<ResourceSnapshot>();
         _criticalValidationReservations = new ConcurrentDictionary<string, int>();
         _lastThrottlingAdjustment = DateTime.UtcNow;
+        _responseTimeMonitor = new ResponseTimeMonitor(config);
         
         // Start resource monitoring
         StartResourceMonitoring();
@@ -79,7 +81,7 @@ public class ValidationPipeline
 
         try
         {
-            // Apply resource throttling
+            // Apply resource and response time throttling
             if (!await AcquireResourcesAsync(context))
             {
                 result.State = ValidationState.Failed;
@@ -87,13 +89,18 @@ public class ValidationPipeline
                 result.Issues.Add(new ValidationIssue
                 {
                     Severity = ValidationSeverity.Error,
-                    Message = "Validation rejected due to resource constraints"
+                    Message = "Validation rejected due to resource constraints or response time throttling"
                 });
                 return result;
             }
+
+            var startTime = DateTime.UtcNow;
         {
             ValidationDelegate pipeline = BuildPipeline(context);
             var pipelineResult = await pipeline(context);
+            
+            // Record response time
+            _responseTimeMonitor.RecordResponseTime(DateTime.UtcNow - startTime);
             
             // Merge pipeline result with our tracking
             result.IsValid = pipelineResult.IsValid;
@@ -395,6 +402,14 @@ public class ValidationPipeline
 
     private async Task<bool> AcquireResourcesAsync(ValidationContext context)
     {
+        // Check response time-based throttling first
+        if (_responseTimeMonitor.ShouldThrottle() && !context.IsCriticalValidation)
+        {
+            _logger.LogWarning("Validation rejected due to response time throttling");
+            return false;
+        }
+
+        var concurrencyLimit = (int)_responseTimeMonitor.GetCurrentConcurrencyLimit();
         if (!await _validationThrottle.WaitAsync(TimeSpan.FromSeconds(30)))
         {
             _logger.LogWarning("Failed to acquire validation slot - max concurrent validations reached");
@@ -563,6 +578,20 @@ public class ValidationPipeline
             Timestamp = DateTime.UtcNow
         });
 
+        // Record response time metrics
+        var responseTimeStats = _responseTimeMonitor.GetStatistics();
+        await _resourceAnalytics.StoreResponseTimeDataAsync(new ResponseTimeData
+        {
+            PipelineId = "ValidationPipeline",
+            AverageResponseTime = responseTimeStats.AverageResponseTime,
+            P95ResponseTime = responseTimeStats.P95ResponseTime,
+            P99ResponseTime = responseTimeStats.P99ResponseTime,
+            SlowRequestPercentage = responseTimeStats.SlowRequestPercentage,
+            TotalRequests = responseTimeStats.TotalRequests,
+            SlowRequests = responseTimeStats.SlowRequests,
+            Timestamp = DateTime.UtcNow
+        });
+
         // Analyze for potential bottlenecks
         var bottlenecks = await _resourceAnalytics.IdentifyBottlenecksAsync();
         foreach (var bottleneck in bottlenecks)
@@ -573,6 +602,18 @@ public class ValidationPipeline
                 Severity = AlertSeverity.Warning,
                 Message = $"Potential bottleneck detected: {bottleneck.Impact}",
                 RecommendedAction = bottleneck.RecommendedAction
+            });
+        }
+
+        // Check for response time degradation
+        if (responseTimeStats.SlowRequestPercentage > _config.ResponseTimeConfig.SlowRequestPercentageThreshold)
+        {
+            await _alertManager.RaiseResourceAlert(new ResourceAlert
+            {
+                ResourceType = ResourceMetricType.ResponseTime,
+                Severity = AlertSeverity.Warning,
+                Message = $"High percentage of slow requests detected: {responseTimeStats.SlowRequestPercentage:F1}% above target response time",
+                RecommendedAction = "Consider adjusting concurrency limits or investigating performance bottlenecks"
             });
         }
     }

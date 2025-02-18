@@ -5,6 +5,9 @@ namespace CodeBuddy.Core.Models;
 public class ValidationResilienceConfig
 {
     // Distributed Monitoring Configuration
+    // Response Time Management Configuration
+    public ResponseTimeConfig ResponseTimeConfig { get; set; } = new ResponseTimeConfig();
+
     public bool EnableDistributedMonitoring { get; set; } = true;
     public TimeSpan NodeSyncInterval { get; set; } = TimeSpan.FromSeconds(5);
     public int MinHealthyNodes { get; set; } = 2;
@@ -94,4 +97,35 @@ public enum LoadBalancingStrategy
     LeastConnections,
     WeightedResponse,
     Predictive
+}
+
+public class ResponseTimeConfig
+{
+    // SLA Thresholds
+    public TimeSpan TargetResponseTime { get; set; } = TimeSpan.FromMilliseconds(200);
+    public TimeSpan MaxAcceptableResponseTime { get; set; } = TimeSpan.FromMilliseconds(500);
+    public TimeSpan DegradationThreshold { get; set; } = TimeSpan.FromMilliseconds(300);
+    
+    // Sliding Window Configuration
+    public TimeSpan SlidingWindowDuration { get; set; } = TimeSpan.FromMinutes(5);
+    public int MinSamplesForAnalysis { get; set; } = 100;
+    
+    // Circuit Breaking
+    public double SlowRequestPercentageThreshold { get; set; } = 20.0; // Percentage of requests exceeding target
+    public int ConsecutiveSlowRequests { get; set; } = 5;
+    
+    // Warm-up Configuration
+    public TimeSpan WarmupPeriod { get; set; } = TimeSpan.FromMinutes(2);
+    public double WarmupConcurrencyMultiplier { get; set; } = 0.5; // Start at 50% capacity
+    public double WarmupStepSize { get; set; } = 0.1; // Increase by 10% per step
+    
+    // Backpressure Configuration
+    public bool EnableBackpressure { get; set; } = true;
+    public double BackpressureThreshold { get; set; } = 0.8; // 80% of max response time
+    public TimeSpan BackpressureRecoveryPeriod { get; set; } = TimeSpan.FromSeconds(30);
+    
+    // Analytics Configuration
+    public bool EnableResponseTimeAnalytics { get; set; } = true;
+    public TimeSpan MetricsRetentionPeriod { get; set; } = TimeSpan.FromDays(30);
+    public int SamplingRate { get; set; } = 100; // Percentage of requests to sample
 }
