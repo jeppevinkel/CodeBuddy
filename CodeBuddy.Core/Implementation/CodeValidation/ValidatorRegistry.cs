@@ -13,7 +13,53 @@ namespace CodeBuddy.Core.Implementation.CodeValidation
     {
         private readonly ConcurrentDictionary<string, ValidatorEntry> _validators = new ConcurrentDictionary<string, ValidatorEntry>();
         private readonly ReaderWriterLockSlim _eventLock = new ReaderWriterLockSlim();
+        private readonly ValidatorDependencyResolver _dependencyResolver;
+        private readonly ValidatorConfiguration _configuration;
         private bool _isDisposed;
+
+        public ValidatorRegistry(ValidatorConfiguration configuration = null)
+        {
+            _configuration = configuration ?? new ValidatorConfiguration();
+            _dependencyResolver = new ValidatorDependencyResolver(this);
+            LoadConfiguredValidators();
+        }
+
+        private void LoadConfiguredValidators()
+        {
+            foreach (var kvp in _configuration.Validators)
+            {
+                if (!kvp.Value.IsEnabled) continue;
+
+                try
+                {
+                    var validatorType = Type.GetType($"{kvp.Value.TypeName}, {kvp.Value.AssemblyName}");
+                    if (validatorType == null)
+                    {
+                        throw new TypeLoadException($"Could not load validator type {kvp.Value.TypeName}");
+                    }
+
+                    var validator = Activator.CreateInstance(validatorType) as ICodeValidator;
+                    if (validator == null)
+                    {
+                        throw new InvalidCastException($"Type {kvp.Value.TypeName} does not implement ICodeValidator");
+                    }
+
+                    var metadata = new ValidatorMetadata
+                    {
+                        Priority = kvp.Value.Priority,
+                        Configuration = kvp.Value.Settings
+                    };
+
+                    RegisterValidator(kvp.Key, validator, metadata);
+                }
+                catch (Exception ex)
+                {
+                    // Log the error but continue loading other validators
+                    // In a real implementation, you would use proper logging here
+                    System.Diagnostics.Debug.WriteLine($"Failed to load validator {kvp.Key}: {ex.Message}");
+                }
+            }
+        }
 
         public event EventHandler<ValidatorRegistrationEventArgs> ValidatorRegistered;
         public event EventHandler<ValidatorRegistrationEventArgs> ValidatorUnregistered;
@@ -24,8 +70,11 @@ namespace CodeBuddy.Core.Implementation.CodeValidation
             if (validator == null) throw new ArgumentNullException(nameof(validator));
 
             ValidateValidator(validator);
+            
+            metadata = metadata ?? new ValidatorMetadata();
+            _dependencyResolver.ValidateDependencies(languageId, metadata.Dependencies);
 
-            var entry = new ValidatorEntry(validator, metadata ?? new ValidatorMetadata());
+            var entry = new ValidatorEntry(validator, metadata);
             
             if (_validators.TryAdd(languageId, entry))
             {
