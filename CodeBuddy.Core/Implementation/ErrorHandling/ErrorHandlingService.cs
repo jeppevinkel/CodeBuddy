@@ -13,6 +13,7 @@ namespace CodeBuddy.Core.Implementation.ErrorHandling
     public class ErrorHandlingService : IErrorHandlingService
     {
         private readonly ILogger<ErrorHandlingService> _logger;
+        private readonly IErrorRecoveryAnalytics _analytics;
         private readonly Dictionary<string, Dictionary<string, string>> _localizedMessages;
         private readonly List<IErrorRecoveryStrategy> _recoveryStrategies;
         private readonly Dictionary<ErrorCategory, CircuitBreakerStatus> _circuitBreakers;
@@ -20,9 +21,10 @@ namespace CodeBuddy.Core.Implementation.ErrorHandling
 
         public RetryPolicy RetryPolicy { get; set; }
 
-        public ErrorHandlingService(ILogger<ErrorHandlingService> logger)
+        public ErrorHandlingService(ILogger<ErrorHandlingService> logger, IErrorRecoveryAnalytics analytics)
         {
             _logger = logger;
+            _analytics = analytics;
             _localizedMessages = new Dictionary<string, Dictionary<string, string>>();
             _recoveryStrategies = new List<IErrorRecoveryStrategy>();
             _circuitBreakers = new Dictionary<ErrorCategory, CircuitBreakerStatus>();
@@ -97,6 +99,11 @@ namespace CodeBuddy.Core.Implementation.ErrorHandling
                     {
                         circuitBreaker.State = CircuitState.Open;
                         circuitBreaker.NextResetAttempt = DateTime.UtcNow.AddMilliseconds(RetryPolicy.CircuitBreakerResetMs);
+                        await _analytics.UpdateCircuitBreakerMetrics(
+                            error.Category.ToString(),
+                            circuitBreaker.State.ToString(),
+                            $"Failure threshold reached: {circuitBreaker.FailureCount} failures"
+                        );
                     }
                 }
             }
@@ -208,6 +215,7 @@ namespace CodeBuddy.Core.Implementation.ErrorHandling
         {
             var context = GetOrCreateRecoveryContext(error);
             var attemptStart = DateTime.UtcNow;
+            var resourceMetrics = new Dictionary<string, double>();
 
             try
             {
@@ -237,6 +245,17 @@ namespace CodeBuddy.Core.Implementation.ErrorHandling
                             Details = $"Recovery successful using strategy {strategy.GetType().Name}"
                         };
                         context.RecoveryHistory.Add(result);
+                        
+                        // Record recovery metrics
+                        resourceMetrics["CPU"] = Environment.ProcessorCount * 0.1; // Example metric
+                        resourceMetrics["Memory"] = GC.GetTotalMemory(false) / 1024.0 / 1024.0; // MB
+                        await _analytics.RecordRecoveryAttempt(
+                            error.Category.ToString(),
+                            true,
+                            TimeSpan.FromMilliseconds(result.DurationMs),
+                            resourceMetrics
+                        );
+                        
                         return true;
                     }
                 }
@@ -251,6 +270,17 @@ namespace CodeBuddy.Core.Implementation.ErrorHandling
                     Details = "All recovery strategies failed"
                 };
                 context.RecoveryHistory.Add(failedResult);
+                
+                // Record failed recovery attempt
+                resourceMetrics["CPU"] = Environment.ProcessorCount * 0.1;
+                resourceMetrics["Memory"] = GC.GetTotalMemory(false) / 1024.0 / 1024.0;
+                await _analytics.RecordRecoveryAttempt(
+                    error.Category.ToString(),
+                    false,
+                    TimeSpan.FromMilliseconds(failedResult.DurationMs),
+                    resourceMetrics
+                );
+                
                 return false;
             }
             catch (Exception ex)
