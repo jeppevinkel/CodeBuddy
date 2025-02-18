@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using CodeBuddy.Core.Models.Rules;
 
 namespace CodeBuddy.Core.Models;
 
@@ -9,7 +10,7 @@ public class ValidationOptions
     public bool ValidateStyle { get; set; } = true;
     public bool ValidateBestPractices { get; set; } = true;
     public bool ValidateErrorHandling { get; set; } = true;
-    public Dictionary<string, object> CustomRules { get; set; } = new();
+    public List<CustomRule> CustomRules { get; set; } = new();
     public PerformanceThresholds PerformanceThresholds { get; set; } = new();
 }
 
