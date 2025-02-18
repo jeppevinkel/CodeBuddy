@@ -14,29 +14,39 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Monitoring
         Task<DashboardView> GetCustomDashboardView(string viewName);
         Task SaveCustomDashboardView(DashboardView view);
         Task<ResourceMetricExport> ExportMetrics(TimeRange timeRange);
-        void SetAlertThreshold(string metricName, double threshold);
+        void SetAlertThreshold(string metricName, double threshold, AlertSeverity severity);
+        Task SetCustomAlertRule(AlertRule rule);
         IEnumerable<Alert> GetActiveAlerts();
         Task<ResourceUsageTrends> GetResourceTrends(TimeRange timeRange);
         Task<List<ResourceOptimizationRecommendation>> GetOptimizationRecommendations();
         Task<List<ResourceBottleneck>> GetResourceBottlenecks(TimeRange timeRange);
+        Task<PerformanceComparison> ComparePerformance(TimeRange period1, TimeRange period2);
+        Task<ResourceUsagePatterns> AnalyzeResourcePatterns(TimeRange timeRange);
+        Task<BottleneckCorrelation> AnalyzeBottleneckCorrelations(TimeRange timeRange);
+        Task<CapacityPlanningInsights> GetCapacityPlanningInsights(TimeRange timeRange);
+        Task<HeatMapData> GetValidationPipelineHeatMap(TimeRange timeRange);
     }
 
     public class MetricsDashboard : IMetricsDashboard
     {
         private readonly IMetricsAggregator _metricsAggregator;
-        private readonly Dictionary<string, double> _alertThresholds = new();
+        private readonly Dictionary<string, (double Threshold, AlertSeverity Severity)> _alertThresholds = new();
+        private readonly List<AlertRule> _customAlertRules = new();
         private readonly List<Alert> _activeAlerts = new();
         private readonly Dictionary<string, DashboardView> _customViews = new();
         private readonly ResourceAnalytics _resourceAnalytics;
+        private readonly TimeSeriesStorage _timeSeriesStorage;
         private Timer _monitoringTimer;
         private const int MonitoringIntervalMs = 5000;
 
         public MetricsDashboard(
             IMetricsAggregator metricsAggregator,
-            ResourceAnalytics resourceAnalytics)
+            ResourceAnalytics resourceAnalytics,
+            TimeSeriesStorage timeSeriesStorage)
         {
             _metricsAggregator = metricsAggregator;
             _resourceAnalytics = resourceAnalytics;
+            _timeSeriesStorage = timeSeriesStorage;
         }
 
         public MetricsDashboard(IMetricsAggregator metricsAggregator)
@@ -205,9 +215,95 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Monitoring
             };
         }
 
-        public void SetAlertThreshold(string metricName, double threshold)
+        public void SetAlertThreshold(string metricName, double threshold, AlertSeverity severity)
         {
-            _alertThresholds[metricName] = threshold;
+            _alertThresholds[metricName] = (threshold, severity);
+        }
+
+        public Task SetCustomAlertRule(AlertRule rule)
+        {
+            _customAlertRules.Add(rule);
+            return Task.CompletedTask;
+        }
+
+        public async Task<PerformanceComparison> ComparePerformance(TimeRange period1, TimeRange period2)
+        {
+            var metrics1 = await _timeSeriesStorage.GetMetrics(period1);
+            var metrics2 = await _timeSeriesStorage.GetMetrics(period2);
+
+            return new PerformanceComparison
+            {
+                Period1 = period1,
+                Period2 = period2,
+                CpuUsageComparison = CompareMetrics(
+                    metrics1.Select(m => m.ResourceMetrics.CpuUsagePercent),
+                    metrics2.Select(m => m.ResourceMetrics.CpuUsagePercent)),
+                MemoryUsageComparison = CompareMetrics(
+                    metrics1.Select(m => m.ResourceMetrics.MemoryUsageMB),
+                    metrics2.Select(m => m.ResourceMetrics.MemoryUsageMB)),
+                ThroughputComparison = CompareThroughput(metrics1, metrics2),
+                LatencyComparison = CompareLatency(metrics1, metrics2),
+                ResourceEfficiencyDelta = CalculateEfficiencyDelta(metrics1, metrics2)
+            };
+        }
+
+        public async Task<ResourceUsagePatterns> AnalyzeResourcePatterns(TimeRange timeRange)
+        {
+            var metrics = await _timeSeriesStorage.GetMetrics(timeRange);
+            return new ResourceUsagePatterns
+            {
+                TimeRange = timeRange,
+                DailyPatterns = IdentifyDailyPatterns(metrics),
+                WeeklyPatterns = IdentifyWeeklyPatterns(metrics),
+                PeakUsagePeriods = IdentifyPeakPeriods(metrics),
+                ResourceCorrelations = AnalyzeResourceCorrelations(metrics),
+                AnomalyPatterns = DetectAnomalyPatterns(metrics)
+            };
+        }
+
+        public async Task<BottleneckCorrelation> AnalyzeBottleneckCorrelations(TimeRange timeRange)
+        {
+            var metrics = await _timeSeriesStorage.GetMetrics(timeRange);
+            var bottlenecks = await GetResourceBottlenecks(timeRange);
+
+            return new BottleneckCorrelation
+            {
+                TimeRange = timeRange,
+                ResourceCorrelations = AnalyzeResourceBottleneckCorrelations(metrics, bottlenecks),
+                WorkloadCorrelations = AnalyzeWorkloadCorrelations(metrics, bottlenecks),
+                CascadingEffects = IdentifyCascadingBottlenecks(bottlenecks),
+                ImpactAnalysis = AnalyzeBottleneckImpact(metrics, bottlenecks)
+            };
+        }
+
+        public async Task<CapacityPlanningInsights> GetCapacityPlanningInsights(TimeRange timeRange)
+        {
+            var metrics = await _timeSeriesStorage.GetMetrics(timeRange);
+            var patterns = await AnalyzeResourcePatterns(timeRange);
+            var bottlenecks = await GetResourceBottlenecks(timeRange);
+
+            return new CapacityPlanningInsights
+            {
+                TimeRange = timeRange,
+                GrowthTrends = AnalyzeGrowthTrends(metrics),
+                ResourceProjections = ProjectResourceNeeds(metrics, patterns),
+                BottleneckRisks = AssessBottleneckRisks(bottlenecks, patterns),
+                ScalingRecommendations = GenerateScalingRecommendations(metrics, patterns),
+                OptimizationOpportunities = IdentifyOptimizationOpportunities(metrics, bottlenecks)
+            };
+        }
+
+        public async Task<HeatMapData> GetValidationPipelineHeatMap(TimeRange timeRange)
+        {
+            var metrics = await _timeSeriesStorage.GetMetrics(timeRange);
+            return new HeatMapData
+            {
+                TimeRange = timeRange,
+                ResourceIntensityMap = GenerateResourceIntensityMap(metrics),
+                BottleneckHotspots = IdentifyBottleneckHotspots(metrics),
+                ComponentLoadDistribution = AnalyzeComponentLoadDistribution(metrics),
+                TimeBasedHeatMap = GenerateTimeBasedHeatMap(metrics)
+            };
         }
 
         public IEnumerable<Alert> GetActiveAlerts()
@@ -225,29 +321,79 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Monitoring
         {
             _activeAlerts.Clear();
 
+            // Check standard thresholds
             foreach (var middleware in metrics.MiddlewareMetrics)
             {
                 var failureRate = CalculateFailureRate(middleware.Value);
                 if (_alertThresholds.TryGetValue($"{middleware.Key}_FailureRate", out var threshold)
-                    && failureRate > threshold)
+                    && failureRate > threshold.Threshold)
                 {
                     _activeAlerts.Add(new Alert
                     {
-                        Severity = AlertSeverity.High,
+                        Severity = threshold.Severity,
                         Message = $"High failure rate ({failureRate:P2}) detected in {middleware.Key}",
-                        Timestamp = DateTime.UtcNow
+                        Timestamp = DateTime.UtcNow,
+                        MetricName = $"{middleware.Key}_FailureRate",
+                        CurrentValue = failureRate,
+                        ThresholdValue = threshold.Threshold
                     });
                 }
             }
 
-            if (metrics.ResourceMetrics.CpuUsagePercent > 80)
+            // Check resource metrics
+            CheckResourceMetrics(metrics);
+
+            // Evaluate custom alert rules
+            EvaluateCustomAlertRules(metrics);
+        }
+
+        private void CheckResourceMetrics(MetricsSummary metrics)
+        {
+            if (_alertThresholds.TryGetValue("CpuUsage", out var cpuThreshold)
+                && metrics.ResourceMetrics.CpuUsagePercent > cpuThreshold.Threshold)
             {
                 _activeAlerts.Add(new Alert
                 {
-                    Severity = AlertSeverity.Medium,
-                    Message = "High CPU usage detected",
-                    Timestamp = DateTime.UtcNow
+                    Severity = cpuThreshold.Severity,
+                    Message = $"High CPU usage detected: {metrics.ResourceMetrics.CpuUsagePercent:F1}%",
+                    Timestamp = DateTime.UtcNow,
+                    MetricName = "CpuUsage",
+                    CurrentValue = metrics.ResourceMetrics.CpuUsagePercent,
+                    ThresholdValue = cpuThreshold.Threshold
                 });
+            }
+
+            if (_alertThresholds.TryGetValue("MemoryUsage", out var memoryThreshold)
+                && metrics.ResourceMetrics.MemoryUsageMB > memoryThreshold.Threshold)
+            {
+                _activeAlerts.Add(new Alert
+                {
+                    Severity = memoryThreshold.Severity,
+                    Message = $"High memory usage detected: {metrics.ResourceMetrics.MemoryUsageMB:F1} MB",
+                    Timestamp = DateTime.UtcNow,
+                    MetricName = "MemoryUsage",
+                    CurrentValue = metrics.ResourceMetrics.MemoryUsageMB,
+                    ThresholdValue = memoryThreshold.Threshold
+                });
+            }
+        }
+
+        private void EvaluateCustomAlertRules(MetricsSummary metrics)
+        {
+            foreach (var rule in _customAlertRules)
+            {
+                if (rule.EvaluateCondition(metrics))
+                {
+                    _activeAlerts.Add(new Alert
+                    {
+                        Severity = rule.Severity,
+                        Message = rule.GenerateAlertMessage(metrics),
+                        Timestamp = DateTime.UtcNow,
+                        MetricName = rule.MetricName,
+                        CurrentValue = rule.GetCurrentValue(metrics),
+                        ThresholdValue = rule.ThresholdValue
+                    });
+                }
             }
         }
 
@@ -360,5 +506,223 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Monitoring
         Low,
         Medium,
         High
+    }
+
+    public class AlertRule
+    {
+        public string MetricName { get; set; }
+        public string Description { get; set; }
+        public AlertSeverity Severity { get; set; }
+        public double ThresholdValue { get; set; }
+        public string Condition { get; set; }
+        public Dictionary<string, double> AdditionalThresholds { get; set; }
+
+        public bool EvaluateCondition(MetricsSummary metrics)
+        {
+            // Implementation depends on the condition logic
+            return false;
+        }
+
+        public double GetCurrentValue(MetricsSummary metrics)
+        {
+            // Implementation to extract current value based on metric name
+            return 0.0;
+        }
+
+        public string GenerateAlertMessage(MetricsSummary metrics)
+        {
+            return $"Custom alert for {MetricName}: {Description}";
+        }
+    }
+
+    public class PerformanceComparison
+    {
+        public TimeRange Period1 { get; set; }
+        public TimeRange Period2 { get; set; }
+        public MetricComparison CpuUsageComparison { get; set; }
+        public MetricComparison MemoryUsageComparison { get; set; }
+        public MetricComparison ThroughputComparison { get; set; }
+        public MetricComparison LatencyComparison { get; set; }
+        public ResourceEfficiencyDelta ResourceEfficiencyDelta { get; set; }
+    }
+
+    public class MetricComparison
+    {
+        public double Period1Average { get; set; }
+        public double Period2Average { get; set; }
+        public double PercentageChange { get; set; }
+        public List<DataPoint> Period1Trend { get; set; }
+        public List<DataPoint> Period2Trend { get; set; }
+        public string Analysis { get; set; }
+    }
+
+    public class ResourceEfficiencyDelta
+    {
+        public double CpuEfficiencyChange { get; set; }
+        public double MemoryEfficiencyChange { get; set; }
+        public double ThroughputPerResourceUnit { get; set; }
+        public List<string> ImprovementAreas { get; set; }
+    }
+
+    public class ResourceUsagePatterns
+    {
+        public TimeRange TimeRange { get; set; }
+        public List<DailyPattern> DailyPatterns { get; set; }
+        public List<WeeklyPattern> WeeklyPatterns { get; set; }
+        public List<PeakUsagePeriod> PeakUsagePeriods { get; set; }
+        public List<ResourceCorrelation> ResourceCorrelations { get; set; }
+        public List<AnomalyPattern> AnomalyPatterns { get; set; }
+    }
+
+    public class BottleneckCorrelation
+    {
+        public TimeRange TimeRange { get; set; }
+        public List<ResourceCorrelation> ResourceCorrelations { get; set; }
+        public List<WorkloadCorrelation> WorkloadCorrelations { get; set; }
+        public List<CascadingEffect> CascadingEffects { get; set; }
+        public ImpactAnalysis ImpactAnalysis { get; set; }
+    }
+
+    public class CapacityPlanningInsights
+    {
+        public TimeRange TimeRange { get; set; }
+        public GrowthTrends GrowthTrends { get; set; }
+        public ResourceProjections ResourceProjections { get; set; }
+        public List<BottleneckRisk> BottleneckRisks { get; set; }
+        public List<ScalingRecommendation> ScalingRecommendations { get; set; }
+        public List<OptimizationOpportunity> OptimizationOpportunities { get; set; }
+    }
+
+    public class HeatMapData
+    {
+        public TimeRange TimeRange { get; set; }
+        public Dictionary<string, double[,]> ResourceIntensityMap { get; set; }
+        public List<Hotspot> BottleneckHotspots { get; set; }
+        public Dictionary<string, double[]> ComponentLoadDistribution { get; set; }
+        public double[,] TimeBasedHeatMap { get; set; }
+    }
+
+    public class DailyPattern
+    {
+        public int HourOfDay { get; set; }
+        public double AverageLoad { get; set; }
+        public double PeakLoad { get; set; }
+        public Dictionary<string, double> ResourceUtilization { get; set; }
+    }
+
+    public class WeeklyPattern
+    {
+        public DayOfWeek DayOfWeek { get; set; }
+        public List<DailyPattern> HourlyPatterns { get; set; }
+        public double AverageDailyLoad { get; set; }
+    }
+
+    public class PeakUsagePeriod
+    {
+        public DateTime StartTime { get; set; }
+        public DateTime EndTime { get; set; }
+        public Dictionary<string, double> PeakMetrics { get; set; }
+        public string Cause { get; set; }
+    }
+
+    public class ResourceCorrelation
+    {
+        public string Resource1 { get; set; }
+        public string Resource2 { get; set; }
+        public double CorrelationCoefficient { get; set; }
+        public string CorrelationType { get; set; }
+        public string Analysis { get; set; }
+    }
+
+    public class AnomalyPattern
+    {
+        public DateTime Timestamp { get; set; }
+        public string MetricName { get; set; }
+        public double ExpectedValue { get; set; }
+        public double ActualValue { get; set; }
+        public string AnomalyType { get; set; }
+        public double Severity { get; set; }
+    }
+
+    public class WorkloadCorrelation
+    {
+        public string WorkloadType { get; set; }
+        public Dictionary<string, double> ResourceImpact { get; set; }
+        public List<string> AffectedComponents { get; set; }
+        public double CorrelationStrength { get; set; }
+    }
+
+    public class CascadingEffect
+    {
+        public string InitialBottleneck { get; set; }
+        public List<string> AffectedComponents { get; set; }
+        public TimeSpan PropagationDelay { get; set; }
+        public double ImpactSeverity { get; set; }
+    }
+
+    public class ImpactAnalysis
+    {
+        public Dictionary<string, double> ComponentImpactScores { get; set; }
+        public List<string> CriticalPaths { get; set; }
+        public Dictionary<string, TimeSpan> RecoveryTimes { get; set; }
+        public List<string> MitigationStrategies { get; set; }
+    }
+
+    public class GrowthTrends
+    {
+        public double MonthlyGrowthRate { get; set; }
+        public Dictionary<string, double> ResourceGrowthRates { get; set; }
+        public List<DataPoint> HistoricalTrend { get; set; }
+        public List<DataPoint> ProjectedTrend { get; set; }
+    }
+
+    public class ResourceProjections
+    {
+        public Dictionary<string, List<DataPoint>> ResourceForecasts { get; set; }
+        public DateTime SaturationDate { get; set; }
+        public Dictionary<string, double> ConfidenceIntervals { get; set; }
+    }
+
+    public class BottleneckRisk
+    {
+        public string Component { get; set; }
+        public double RiskScore { get; set; }
+        public DateTime PredictedOccurrence { get; set; }
+        public List<string> ContributingFactors { get; set; }
+        public List<string> PreventiveActions { get; set; }
+    }
+
+    public class ScalingRecommendation
+    {
+        public string Resource { get; set; }
+        public double CurrentCapacity { get; set; }
+        public double RecommendedCapacity { get; set; }
+        public DateTime ImplementBy { get; set; }
+        public string Justification { get; set; }
+        public double ROIEstimate { get; set; }
+    }
+
+    public class OptimizationOpportunity
+    {
+        public string Area { get; set; }
+        public string Description { get; set; }
+        public double ExpectedImprovement { get; set; }
+        public string Implementation { get; set; }
+        public double EffortEstimate { get; set; }
+    }
+
+    public class Hotspot
+    {
+        public string Component { get; set; }
+        public DateTime Timestamp { get; set; }
+        public double Intensity { get; set; }
+        public Dictionary<string, double> ResourceMetrics { get; set; }
+        public List<string> ContributingFactors { get; set; }
+    }
+
+    public class DataPoint
+    {
+        public DateTime Timestamp { get; set; }
+        public double Value { get; set; }
     }
 }
