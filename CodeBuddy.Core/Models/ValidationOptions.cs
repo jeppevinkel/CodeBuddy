@@ -1,9 +1,19 @@
+using System;
 using System.Collections.Generic;
+using CodeBuddy.Core.Models.Rules;
 
 namespace CodeBuddy.Core.Models;
 
 public class ValidationOptions
 {
+    // Rule Customization Options
+    public string RuleTemplateId { get; set; }
+    public Dictionary<string, object> RuleParameters { get; set; } = new();
+    public List<string> InheritedRuleTemplates { get; set; } = new();
+    public Dictionary<string, bool> ConditionalRuleActivation { get; set; } = new();
+    public List<string> ChainedRules { get; set; } = new();
+    public Dictionary<string, ValidationContext> ContextualRules { get; set; } = new();
+    
     // General Validation Options
     public bool EnablePerformanceValidation { get; set; }
     public bool EnableMemoryValidation { get; set; }
