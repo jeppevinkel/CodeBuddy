@@ -587,6 +587,116 @@ namespace CodeBuddy.Core.Implementation.Documentation
 
             await _fileOps.WriteFileAsync("docs/doc-map.json",
                 System.Text.Json.JsonSerializer.Serialize(docMap, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+
+            // Generate search index
+            await GenerateSearchIndex(result);
+        }
+
+        private async Task GenerateSearchIndex(DocumentationResult result)
+        {
+            var searchIndex = new List<SearchIndexEntry>();
+            
+            // Index API types
+            foreach (var type in result.Types)
+            {
+                // Index type
+                searchIndex.Add(new SearchIndexEntry
+                {
+                    Title = type.Name,
+                    Path = $"api/{type.Namespace?.Replace(".", "/")}/{type.Name}.md",
+                    Content = type.Description,
+                    Category = "API",
+                    Type = "Type"
+                });
+                
+                // Index methods
+                foreach (var method in type.Methods ?? Enumerable.Empty<MethodDocumentation>())
+                {
+                    searchIndex.Add(new SearchIndexEntry
+                    {
+                        Title = $"{type.Name}.{method.Name}",
+                        Path = $"api/{type.Namespace?.Replace(".", "/")}/{type.Name}.md#{method.Name.ToLower()}",
+                        Content = method.Description,
+                        Category = "API",
+                        Type = "Method",
+                        Parent = type.Name
+                    });
+                }
+                
+                // Index properties
+                foreach (var prop in type.Properties ?? Enumerable.Empty<PropertyDocumentation>())
+                {
+                    searchIndex.Add(new SearchIndexEntry
+                    {
+                        Title = $"{type.Name}.{prop.Name}",
+                        Path = $"api/{type.Namespace?.Replace(".", "/")}/{type.Name}.md#{prop.Name.ToLower()}",
+                        Content = prop.Description,
+                        Category = "API",
+                        Type = "Property",
+                        Parent = type.Name
+                    });
+                }
+            }
+            
+            // Index plugins
+            foreach (var plugin in result.Plugins ?? Enumerable.Empty<PluginDocumentation>())
+            {
+                searchIndex.Add(new SearchIndexEntry
+                {
+                    Title = plugin.Name,
+                    Path = $"plugins/{plugin.Name}.md",
+                    Content = plugin.Description,
+                    Category = "Plugins",
+                    Type = "Plugin"
+                });
+            }
+            
+            // Index validation documentation
+            if (result.Validation != null)
+            {
+                // Index components
+                foreach (var component in result.Validation.Components ?? Enumerable.Empty<ValidationComponent>())
+                {
+                    searchIndex.Add(new SearchIndexEntry
+                    {
+                        Title = component.Name,
+                        Path = "validation/components.md#" + component.Name.ToLower().Replace(" ", "-"),
+                        Content = component.Description,
+                        Category = "Validation",
+                        Type = "Component"
+                    });
+                }
+                
+                // Index pipeline stages
+                foreach (var stage in result.Validation.Pipeline ?? Enumerable.Empty<PipelineStage>())
+                {
+                    searchIndex.Add(new SearchIndexEntry
+                    {
+                        Title = stage.Name,
+                        Path = "validation/pipeline.md#" + stage.Name.ToLower().Replace(" ", "-"),
+                        Content = stage.Description,
+                        Category = "Validation",
+                        Type = "Pipeline Stage"
+                    });
+                }
+            }
+            
+            // Index architecture decisions
+            foreach (var decision in result.ArchitectureDecisions ?? Enumerable.Empty<ArchitectureDecision>())
+            {
+                searchIndex.Add(new SearchIndexEntry
+                {
+                    Title = decision.Title,
+                    Path = $"adr/{decision.Date:yyyyMMdd}-{decision.Title.ToLower().Replace(" ", "-")}.md",
+                    Content = decision.Context,
+                    Category = "Architecture",
+                    Type = "Decision Record"
+                });
+            }
+            
+            // Write search index
+            await _fileOps.WriteFileAsync("docs/search-index.json",
+                System.Text.Json.JsonSerializer.Serialize(searchIndex, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         }
 
         private async Task GeneratePluginMarkdownFiles(DocumentationResult result)
@@ -768,50 +878,561 @@ namespace CodeBuddy.Core.Implementation.Documentation
 
         private string GeneratePluginOverviewMarkdown(DocumentationResult result)
         {
-            // Generate plugin system overview
-            return string.Empty;
+            var builder = new System.Text.StringBuilder();
+            
+            builder.AppendLine("# Plugin System Overview");
+            builder.AppendLine();
+            builder.AppendLine("## Introduction");
+            builder.AppendLine();
+            builder.AppendLine("The CodeBuddy plugin system allows extending the core functionality through custom plugins.");
+            builder.AppendLine("This document provides an overview of the plugin architecture and guidelines for plugin development.");
+            builder.AppendLine();
+            
+            // Plugin Architecture
+            builder.AppendLine("## Plugin Architecture");
+            builder.AppendLine();
+            builder.AppendLine("Plugins in CodeBuddy follow a modular architecture:");
+            builder.AppendLine();
+            builder.AppendLine("1. Each plugin is a separate assembly that implements the `IPlugin` interface");
+            builder.AppendLine("2. Plugins are loaded dynamically at runtime");
+            builder.AppendLine("3. Plugin lifecycle is managed by the `PluginManager`");
+            builder.AppendLine("4. Plugins can define their own configuration schema");
+            builder.AppendLine();
+            
+            // Available Plugins
+            if (result.Plugins?.Any() == true)
+            {
+                builder.AppendLine("## Available Plugins");
+                builder.AppendLine();
+                builder.AppendLine("| Plugin | Version | Description |");
+                builder.AppendLine("|--------|----------|-------------|");
+                foreach (var plugin in result.Plugins)
+                {
+                    builder.AppendLine($"| [{plugin.Name}]({plugin.Name}.md) | {plugin.Version} | {plugin.Description} |");
+                }
+                builder.AppendLine();
+            }
+            
+            // Development Guide
+            builder.AppendLine("## Plugin Development Guide");
+            builder.AppendLine();
+            builder.AppendLine("### Getting Started");
+            builder.AppendLine();
+            builder.AppendLine("1. Create a new class library project");
+            builder.AppendLine("2. Add a reference to CodeBuddy.Core");
+            builder.AppendLine("3. Implement the `IPlugin` interface");
+            builder.AppendLine("4. Define plugin configuration (optional)");
+            builder.AppendLine();
+            
+            builder.AppendLine("### Example Plugin");
+            builder.AppendLine();
+            builder.AppendLine("```csharp");
+            builder.AppendLine("public class ExamplePlugin : IPlugin");
+            builder.AppendLine("{");
+            builder.AppendLine("    public string Name => \"ExamplePlugin\";");
+            builder.AppendLine("    public string Version => \"1.0.0\";");
+            builder.AppendLine();
+            builder.AppendLine("    public Task InitializeAsync(IPluginContext context)");
+            builder.AppendLine("    {");
+            builder.AppendLine("        // Plugin initialization code");
+            builder.AppendLine("        return Task.CompletedTask;");
+            builder.AppendLine("    }");
+            builder.AppendLine("}");
+            builder.AppendLine("```");
+            builder.AppendLine();
+            
+            // Best Practices
+            builder.AppendLine("## Best Practices");
+            builder.AppendLine();
+            builder.AppendLine("1. Follow semantic versioning");
+            builder.AppendLine("2. Implement proper error handling");
+            builder.AppendLine("3. Use dependency injection");
+            builder.AppendLine("4. Include XML documentation");
+            builder.AppendLine("5. Write unit tests");
+            builder.AppendLine();
+            
+            return builder.ToString();
         }
 
         private string GeneratePluginMarkdown(PluginDocumentation plugin)
         {
-            // Generate plugin-specific markdown
-            return string.Empty;
+            var builder = new System.Text.StringBuilder();
+            
+            // Header
+            builder.AppendLine($"# {plugin.Name}");
+            builder.AppendLine();
+            builder.AppendLine($"Version: {plugin.Version}");
+            builder.AppendLine();
+            
+            // Description
+            builder.AppendLine("## Overview");
+            builder.AppendLine();
+            builder.AppendLine(plugin.Description);
+            builder.AppendLine();
+            
+            // Dependencies
+            if (plugin.Dependencies?.Any() == true)
+            {
+                builder.AppendLine("## Dependencies");
+                builder.AppendLine();
+                foreach (var dep in plugin.Dependencies)
+                {
+                    builder.AppendLine($"- {dep}");
+                }
+                builder.AppendLine();
+            }
+            
+            // Configuration
+            if (plugin.Configuration != null)
+            {
+                builder.AppendLine("## Configuration");
+                builder.AppendLine();
+                builder.AppendLine("```json");
+                builder.AppendLine(System.Text.Json.JsonSerializer.Serialize(plugin.Configuration, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+                builder.AppendLine("```");
+                builder.AppendLine();
+            }
+            
+            // Interfaces
+            if (plugin.Interfaces?.Any() == true)
+            {
+                builder.AppendLine("## Interfaces");
+                builder.AppendLine();
+                foreach (var iface in plugin.Interfaces)
+                {
+                    builder.AppendLine($"### {iface.Name}");
+                    builder.AppendLine();
+                    builder.AppendLine(iface.Description);
+                    builder.AppendLine();
+                    
+                    if (iface.Methods?.Any() == true)
+                    {
+                        builder.AppendLine("#### Methods");
+                        builder.AppendLine();
+                        foreach (var method in iface.Methods)
+                        {
+                            builder.AppendLine($"##### {method.Name}");
+                            builder.AppendLine();
+                            builder.AppendLine(method.Description);
+                            builder.AppendLine();
+                        }
+                    }
+                }
+            }
+            
+            // Examples
+            if (plugin.Examples?.Any() == true)
+            {
+                builder.AppendLine("## Examples");
+                builder.AppendLine();
+                foreach (var example in plugin.Examples)
+                {
+                    builder.AppendLine($"### {example.Title}");
+                    builder.AppendLine();
+                    builder.AppendLine(example.Description);
+                    builder.AppendLine();
+                    builder.AppendLine($"```{example.Language}");
+                    builder.AppendLine(example.Code);
+                    builder.AppendLine("```");
+                    builder.AppendLine();
+                }
+            }
+            
+            return builder.ToString();
         }
 
         private string GenerateValidationOverviewMarkdown(DocumentationResult result)
         {
-            // Generate validation system overview
-            return string.Empty;
+            var builder = new System.Text.StringBuilder();
+            
+            builder.AppendLine("# Validation System Overview");
+            builder.AppendLine();
+            builder.AppendLine("## Introduction");
+            builder.AppendLine();
+            builder.AppendLine("The CodeBuddy validation system provides comprehensive code analysis and validation across multiple programming languages.");
+            builder.AppendLine("This document provides an overview of the validation system architecture and its key components.");
+            builder.AppendLine();
+            
+            // Core Components
+            builder.AppendLine("## Core Components");
+            builder.AppendLine();
+            foreach (var component in result.Validation.Components)
+            {
+                builder.AppendLine($"### {component.Name}");
+                builder.AppendLine();
+                builder.AppendLine(component.Description);
+                builder.AppendLine();
+                
+                if (component.Responsibilities?.Any() == true)
+                {
+                    builder.AppendLine("#### Responsibilities:");
+                    builder.AppendLine();
+                    foreach (var responsibility in component.Responsibilities)
+                    {
+                        builder.AppendLine($"- {responsibility}");
+                    }
+                    builder.AppendLine();
+                }
+            }
+            
+            // Pipeline Overview
+            builder.AppendLine("## Validation Pipeline");
+            builder.AppendLine();
+            builder.AppendLine("The validation process follows a pipeline architecture with the following stages:");
+            builder.AppendLine();
+            foreach (var stage in result.Validation.Pipeline)
+            {
+                builder.AppendLine($"1. {stage.Name}");
+                builder.AppendLine($"   - {stage.Description}");
+            }
+            
+            return builder.ToString();
         }
 
         private string GenerateValidationComponentsMarkdown(DocumentationResult result)
         {
-            // Generate validation components documentation
-            return string.Empty;
+            var builder = new System.Text.StringBuilder();
+            
+            builder.AppendLine("# Validation Components");
+            builder.AppendLine();
+            
+            foreach (var component in result.Validation.Components)
+            {
+                builder.AppendLine($"## {component.Name}");
+                builder.AppendLine();
+                builder.AppendLine(component.Description);
+                builder.AppendLine();
+                
+                // Configuration
+                if (component.Configuration != null)
+                {
+                    builder.AppendLine("### Configuration");
+                    builder.AppendLine();
+                    builder.AppendLine("```json");
+                    builder.AppendLine(System.Text.Json.JsonSerializer.Serialize(component.Configuration, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+                    builder.AppendLine("```");
+                    builder.AppendLine();
+                }
+                
+                // Interfaces
+                if (component.Interfaces?.Any() == true)
+                {
+                    builder.AppendLine("### Interfaces");
+                    builder.AppendLine();
+                    foreach (var iface in component.Interfaces)
+                    {
+                        builder.AppendLine($"#### {iface.Name}");
+                        builder.AppendLine();
+                        builder.AppendLine(iface.Description);
+                        builder.AppendLine();
+                    }
+                }
+                
+                // Examples
+                if (component.Examples?.Any() == true)
+                {
+                    builder.AppendLine("### Examples");
+                    builder.AppendLine();
+                    foreach (var example in component.Examples)
+                    {
+                        builder.AppendLine($"#### {example.Title}");
+                        builder.AppendLine();
+                        builder.AppendLine($"```{example.Language}");
+                        builder.AppendLine(example.Code);
+                        builder.AppendLine("```");
+                        builder.AppendLine();
+                    }
+                }
+            }
+            
+            return builder.ToString();
         }
 
         private string GenerateValidationPipelineMarkdown(DocumentationResult result)
         {
-            // Generate validation pipeline documentation
-            return string.Empty;
+            var builder = new System.Text.StringBuilder();
+            
+            builder.AppendLine("# Validation Pipeline");
+            builder.AppendLine();
+            builder.AppendLine("## Overview");
+            builder.AppendLine();
+            builder.AppendLine("The validation pipeline processes code through multiple stages to perform comprehensive analysis and validation.");
+            builder.AppendLine();
+            
+            // Pipeline Stages
+            builder.AppendLine("## Pipeline Stages");
+            builder.AppendLine();
+            foreach (var stage in result.Validation.Pipeline)
+            {
+                builder.AppendLine($"### {stage.Name}");
+                builder.AppendLine();
+                builder.AppendLine(stage.Description);
+                builder.AppendLine();
+                
+                if (stage.InputTypes?.Any() == true)
+                {
+                    builder.AppendLine("#### Input Types");
+                    builder.AppendLine();
+                    foreach (var input in stage.InputTypes)
+                    {
+                        builder.AppendLine($"- {input}");
+                    }
+                    builder.AppendLine();
+                }
+                
+                if (stage.OutputTypes?.Any() == true)
+                {
+                    builder.AppendLine("#### Output Types");
+                    builder.AppendLine();
+                    foreach (var output in stage.OutputTypes)
+                    {
+                        builder.AppendLine($"- {output}");
+                    }
+                    builder.AppendLine();
+                }
+                
+                if (stage.Configuration != null)
+                {
+                    builder.AppendLine("#### Configuration");
+                    builder.AppendLine();
+                    builder.AppendLine("```json");
+                    builder.AppendLine(System.Text.Json.JsonSerializer.Serialize(stage.Configuration, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+                    builder.AppendLine("```");
+                    builder.AppendLine();
+                }
+            }
+            
+            return builder.ToString();
         }
 
         private string GenerateErrorHandlingMarkdown(DocumentationResult result)
         {
-            // Generate error handling documentation
-            return string.Empty;
+            var builder = new System.Text.StringBuilder();
+            
+            builder.AppendLine("# Error Handling");
+            builder.AppendLine();
+            builder.AppendLine("## Overview");
+            builder.AppendLine();
+            builder.AppendLine("The validation system implements comprehensive error handling to ensure reliability and provide meaningful feedback.");
+            builder.AppendLine();
+            
+            // Error Handling Patterns
+            if (result.Validation.ErrorHandling?.Any() == true)
+            {
+                builder.AppendLine("## Error Handling Patterns");
+                builder.AppendLine();
+                foreach (var pattern in result.Validation.ErrorHandling)
+                {
+                    builder.AppendLine($"### {pattern.Name}");
+                    builder.AppendLine();
+                    builder.AppendLine(pattern.Description);
+                    builder.AppendLine();
+                    
+                    if (pattern.UseCases?.Any() == true)
+                    {
+                        builder.AppendLine("#### Use Cases");
+                        builder.AppendLine();
+                        foreach (var useCase in pattern.UseCases)
+                        {
+                            builder.AppendLine($"- {useCase}");
+                        }
+                        builder.AppendLine();
+                    }
+                    
+                    if (pattern.Example != null)
+                    {
+                        builder.AppendLine("#### Example");
+                        builder.AppendLine();
+                        builder.AppendLine($"```{pattern.Example.Language}");
+                        builder.AppendLine(pattern.Example.Code);
+                        builder.AppendLine("```");
+                        builder.AppendLine();
+                    }
+                }
+            }
+            
+            // Recovery Strategies
+            builder.AppendLine("## Recovery Strategies");
+            builder.AppendLine();
+            builder.AppendLine("The system implements the following error recovery strategies:");
+            builder.AppendLine();
+            builder.AppendLine("1. Retry with exponential backoff");
+            builder.AppendLine("2. Circuit breaker pattern");
+            builder.AppendLine("3. Fallback mechanisms");
+            builder.AppendLine("4. Graceful degradation");
+            
+            return builder.ToString();
         }
 
         private string GeneratePerformanceMarkdown(DocumentationResult result)
         {
-            // Generate performance considerations documentation
-            return string.Empty;
+            var builder = new System.Text.StringBuilder();
+            
+            builder.AppendLine("# Performance Considerations");
+            builder.AppendLine();
+            builder.AppendLine("## Overview");
+            builder.AppendLine();
+            builder.AppendLine("This document outlines key performance aspects of the validation system and provides guidance for optimal usage.");
+            builder.AppendLine();
+            
+            // Performance Considerations
+            if (result.Validation.Performance?.Any() == true)
+            {
+                foreach (var consideration in result.Validation.Performance)
+                {
+                    builder.AppendLine($"## {consideration.Category}");
+                    builder.AppendLine();
+                    builder.AppendLine(consideration.Description);
+                    builder.AppendLine();
+                    
+                    if (consideration.Guidelines?.Any() == true)
+                    {
+                        builder.AppendLine("### Guidelines");
+                        builder.AppendLine();
+                        foreach (var guideline in consideration.Guidelines)
+                        {
+                            builder.AppendLine($"- {guideline}");
+                        }
+                        builder.AppendLine();
+                    }
+                    
+                    if (consideration.Metrics?.Any() == true)
+                    {
+                        builder.AppendLine("### Key Metrics");
+                        builder.AppendLine();
+                        builder.AppendLine("| Metric | Target | Notes |");
+                        builder.AppendLine("|--------|---------|-------|");
+                        foreach (var metric in consideration.Metrics)
+                        {
+                            builder.AppendLine($"| {metric.Name} | {metric.Target} | {metric.Notes} |");
+                        }
+                        builder.AppendLine();
+                    }
+                }
+            }
+            
+            // Optimization Tips
+            builder.AppendLine("## Optimization Tips");
+            builder.AppendLine();
+            builder.AppendLine("1. Use appropriate caching strategies");
+            builder.AppendLine("2. Implement parallel processing where possible");
+            builder.AppendLine("3. Optimize resource usage");
+            builder.AppendLine("4. Monitor and tune system performance");
+            
+            return builder.ToString();
         }
 
         private string GenerateTypeScriptDefinitions(List<TypeDocumentation> types)
         {
-            // Generate TypeScript definitions
-            return string.Empty;
+            var builder = new System.Text.StringBuilder();
+            
+            builder.AppendLine("// Type definitions for CodeBuddy");
+            builder.AppendLine("// Generated automatically - do not edit manually");
+            builder.AppendLine();
+            
+            // Declare namespace
+            builder.AppendLine("declare namespace CodeBuddy {");
+            builder.AppendLine();
+            
+            // Generate interfaces
+            foreach (var type in types.Where(t => t.Name.StartsWith("I")))
+            {
+                builder.AppendLine($"    export interface {type.Name} {{");
+                
+                // Properties
+                if (type.Properties?.Any() == true)
+                {
+                    foreach (var prop in type.Properties)
+                    {
+                        var tsType = MapCSharpTypeToTypeScript(prop.Type);
+                        builder.AppendLine($"        {prop.Name}: {tsType};");
+                    }
+                }
+                
+                // Methods
+                if (type.Methods?.Any() == true)
+                {
+                    foreach (var method in type.Methods)
+                    {
+                        var parameters = string.Join(", ", method.Parameters?.Select(p => 
+                            $"{p.Name}: {MapCSharpTypeToTypeScript(p.Type)}") ?? Array.Empty<string>());
+                            
+                        var returnType = MapCSharpTypeToTypeScript(method.ReturnType);
+                        builder.AppendLine($"        {method.Name}({parameters}): {returnType};");
+                    }
+                }
+                
+                builder.AppendLine("    }");
+                builder.AppendLine();
+            }
+            
+            // Generate classes
+            foreach (var type in types.Where(t => !t.Name.StartsWith("I")))
+            {
+                var implements = type.Interfaces?.Any() == true 
+                    ? $" implements {string.Join(", ", type.Interfaces)}"
+                    : "";
+                    
+                builder.AppendLine($"    export class {type.Name}{implements} {{");
+                
+                // Properties
+                if (type.Properties?.Any() == true)
+                {
+                    foreach (var prop in type.Properties)
+                    {
+                        var tsType = MapCSharpTypeToTypeScript(prop.Type);
+                        builder.AppendLine($"        {prop.Name}: {tsType};");
+                    }
+                }
+                
+                // Constructor
+                builder.AppendLine("        constructor();");
+                
+                // Methods
+                if (type.Methods?.Any() == true)
+                {
+                    foreach (var method in type.Methods)
+                    {
+                        var parameters = string.Join(", ", method.Parameters?.Select(p => 
+                            $"{p.Name}: {MapCSharpTypeToTypeScript(p.Type)}") ?? Array.Empty<string>());
+                            
+                        var returnType = MapCSharpTypeToTypeScript(method.ReturnType);
+                        builder.AppendLine($"        {method.Name}({parameters}): {returnType};");
+                    }
+                }
+                
+                builder.AppendLine("    }");
+                builder.AppendLine();
+            }
+            
+            // Close namespace
+            builder.AppendLine("}");
+            
+            return builder.ToString();
+        }
+        
+        private string MapCSharpTypeToTypeScript(string csharpType)
+        {
+            return csharpType switch
+            {
+                "string" => "string",
+                "int" => "number",
+                "long" => "number",
+                "float" => "number",
+                "double" => "number",
+                "decimal" => "number",
+                "bool" => "boolean",
+                "void" => "void",
+                "object" => "any",
+                "Task" => "Promise<void>",
+                var t when t.StartsWith("Task<") => $"Promise<{MapCSharpTypeToTypeScript(t[5..^1])}>",
+                var t when t.StartsWith("List<") => $"Array<{MapCSharpTypeToTypeScript(t[5..^1])}>",
+                var t when t.StartsWith("IList<") => $"Array<{MapCSharpTypeToTypeScript(t[6..^1])}>",
+                var t when t.StartsWith("IEnumerable<") => $"Array<{MapCSharpTypeToTypeScript(t[12..^1])}>",
+                var t when t.StartsWith("Dictionary<") => "{ [key: string]: any }",
+                var t when t.StartsWith("IDictionary<") => "{ [key: string]: any }",
+                _ => csharpType
+            };
         }
     }
 }
