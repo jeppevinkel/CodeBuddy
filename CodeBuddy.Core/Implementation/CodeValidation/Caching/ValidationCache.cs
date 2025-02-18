@@ -2,7 +2,10 @@ using System;
 using System.Collections.Concurrent;
 using System.Threading.Tasks;
 using System.Linq;
+using System.Diagnostics;
 using CodeBuddy.Core.Models;
+using CodeBuddy.Core.Models.Analytics;
+using CodeBuddy.Core.Implementation.CodeValidation.Monitoring;
 using Microsoft.Extensions.Options;
 using System.Security.Cryptography;
 using System.Text;
@@ -14,64 +17,110 @@ namespace CodeBuddy.Core.Implementation.CodeValidation.Caching
         private readonly ValidationCacheConfig _config;
         private readonly ConcurrentDictionary<string, CacheEntry> _cache;
         private readonly ValidationCacheStats _stats;
+        private readonly IValidationCacheMonitor _monitor;
 
-        public ValidationCache(IOptions<ValidationCacheConfig> config)
+        public ValidationCache(
+            IOptions<ValidationCacheConfig> config,
+            IValidationCacheMonitor monitor)
         {
             _config = config.Value;
             _cache = new ConcurrentDictionary<string, CacheEntry>();
             _stats = new ValidationCacheStats();
+            _monitor = monitor;
         }
 
         public async Task<(bool found, ValidationResult result)> TryGetAsync(string codeHash, ValidationOptions options)
         {
             var key = GenerateCacheKey(codeHash, options);
+            var sw = Stopwatch.StartNew();
+            bool found = false;
             
-            if (_cache.TryGetValue(key, out var entry))
+            try
             {
-                if (IsEntryValid(entry))
+                if (_cache.TryGetValue(key, out var entry))
                 {
-                    _stats.CacheHits++;
-                    return (true, entry.Result);
+                    if (IsEntryValid(entry))
+                    {
+                        _stats.CacheHits++;
+                        found = true;
+                        return (true, entry.Result);
+                    }
+                    
+                    // Entry expired
+                    _cache.TryRemove(key, out _);
                 }
-                
-                // Entry expired
-                _cache.TryRemove(key, out _);
-            }
 
-            _stats.CacheMisses++;
-            return (false, null);
+                _stats.CacheMisses++;
+                return (false, null);
+            }
+            finally
+            {
+                sw.Stop();
+                await _monitor.RecordOperationMetricsAsync($"Cache_Get_{(found ? "Hit" : "Miss")}", sw.ElapsedTicks * 1000000 / Stopwatch.Frequency, found);
+            }
         }
 
         public async Task SetAsync(string codeHash, ValidationOptions options, ValidationResult result)
         {
             var key = GenerateCacheKey(codeHash, options);
-            var entry = new CacheEntry
-            {
-                Result = result,
-                CreatedAt = DateTime.UtcNow,
-                ExpiresAt = DateTime.UtcNow.AddMinutes(_config.DefaultTTLMinutes)
-            };
+            var sw = Stopwatch.StartNew();
+            bool success = false;
 
-            _cache.AddOrUpdate(key, entry, (_, __) => entry);
-            await EnforceCacheLimits();
+            try
+            {
+                var entry = new CacheEntry
+                {
+                    Result = result,
+                    CreatedAt = DateTime.UtcNow,
+                    ExpiresAt = DateTime.UtcNow.AddMinutes(_config.DefaultTTLMinutes)
+                };
+
+                _cache.AddOrUpdate(key, entry, (_, __) => entry);
+                success = true;
+                await EnforceCacheLimits();
+            }
+            finally
+            {
+                sw.Stop();
+                await _monitor.RecordOperationMetricsAsync("Cache_Set", sw.ElapsedTicks * 1000000 / Stopwatch.Frequency, success);
+            }
         }
 
         public async Task InvalidateAsync(string reason, string pattern = null)
         {
-            if (string.IsNullOrEmpty(pattern))
-            {
-                _cache.Clear();
-            }
-            else
-            {
-                var keysToRemove = _cache.Keys.Where(k => k.Contains(pattern));
-                foreach (var key in keysToRemove)
-                {
-                    _cache.TryRemove(key, out _);
-                }
-            }
+            var sw = Stopwatch.StartNew();
+            int removedCount = 0;
 
-            _stats.InvalidationCount++;
+            try
+            {
+                if (string.IsNullOrEmpty(pattern))
+                {
+                    removedCount = _cache.Count;
+                    _cache.Clear();
+                }
+                else
+                {
+                    var keysToRemove = _cache.Keys.Where(k => k.Contains(pattern)).ToList();
+                    removedCount = keysToRemove.Count;
+                    foreach (var key in keysToRemove)
+                    {
+                        _cache.TryRemove(key, out _);
+                    }
+                }
+
+                _stats.InvalidationCount++;
+            }
+            finally
+            {
+                sw.Stop();
+                await _monitor.RecordOperationMetricsAsync($"Cache_Invalidate_{reason}", sw.ElapsedTicks * 1000000 / Stopwatch.Frequency, true);
+                
+                var metrics = new CachePerformanceMetrics
+                {
+                    InvalidationImpactedEntries = removedCount
+                };
+                await _monitor.AlertIfThresholdExceededAsync(metrics);
+            }
         }
 
         public async Task<ValidationCacheStats> GetStatsAsync()
