@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text.Json.Nodes;
 using CodeBuddy.Core.Interfaces;
 using CodeBuddy.Core.Models;
+using CodeBuddy.Core.Models.Auth;
 using Microsoft.Extensions.Logging;
 
 namespace CodeBuddy.Core.Implementation;
@@ -19,28 +20,39 @@ public class PluginManager : IPluginManager
     private readonly Dictionary<string, JsonObject> _pluginStates = new();
     private readonly PluginWatcher _pluginWatcher;
     private readonly PluginHealthMonitor _healthMonitor;
+    private readonly IPluginAuthService _authService;
     private readonly SemaphoreSlim _reloadLock = new(1);
     private string? _monitoredDirectory;
 
     public PluginManager(
-        ILogger<PluginManager> logger, 
-        ILoggerFactory loggerFactory)
+        ILogger<PluginManager> logger,
+        ILoggerFactory loggerFactory,
+        IPluginAuthService authService)
     {
         _logger = logger;
         _pluginLogger = loggerFactory.CreateLogger("Plugins");
+        _authService = authService;
         _healthMonitor = new PluginHealthMonitor(loggerFactory.CreateLogger<PluginHealthMonitor>());
         _pluginWatcher = new PluginWatcher(
             loggerFactory.CreateLogger<PluginWatcher>(),
             HandlePluginFileChange);
     }
 
-    public async Task<IEnumerable<IPlugin>> LoadPluginsAsync(string directory)
+    public async Task<IEnumerable<IPlugin>> LoadPluginsAsync(string directory, PluginAuthContext authContext)
     {
         try
         {
             await _reloadLock.WaitAsync();
             try
             {
+                // Verify permission
+                if (!await _authService.HasPermissionAsync(authContext, PluginPermissions.Install))
+                {
+                    _logger.LogWarning("Unauthorized attempt to load plugins by user {User}", authContext.UserName);
+                    await _authService.LogAuditEventAsync("*", "LoadPlugins", authContext, false);
+                    return Enumerable.Empty<IPlugin>();
+                }
+
                 _logger.LogInformation("Loading plugins from directory {Directory}", directory);
 
                 if (!Directory.Exists(directory))
@@ -57,7 +69,15 @@ public class PluginManager : IPluginManager
                 {
                     try
                     {
-                        var pluginsFromFile = await LoadPluginsFromFileAsync(pluginFile);
+                        // Verify plugin signature
+                        if (!await _authService.ValidatePluginSignatureAsync(pluginFile, authContext))
+                        {
+                            _logger.LogWarning("Invalid plugin signature: {File}", pluginFile);
+                            await _authService.LogAuditEventAsync("*", "ValidateSignature", authContext, false);
+                            continue;
+                        }
+
+                        var pluginsFromFile = await LoadPluginsFromFileAsync(pluginFile, authContext);
                         discoveredPlugins.AddRange(pluginsFromFile);
                     }
                     catch (Exception ex)
@@ -82,7 +102,7 @@ public class PluginManager : IPluginManager
         }
     }
 
-    private async Task<IEnumerable<IPlugin>> LoadPluginsFromFileAsync(string pluginFile)
+    private async Task<IEnumerable<IPlugin>> LoadPluginsFromFileAsync(string pluginFile, PluginAuthContext authContext)
     {
         var plugins = new List<IPlugin>();
         var assembly = Assembly.LoadFrom(pluginFile);
@@ -170,11 +190,38 @@ public class PluginManager : IPluginManager
         _logger.LogInformation("Initialized plugin: {Id}", plugin.Id);
     }
 
-    public async Task<bool> EnablePluginAsync(string pluginId)
+    public async Task<bool> EnablePluginAsync(string pluginId, PluginAuthContext authContext)
     {
         await _reloadLock.WaitAsync();
         try
         {
+            // Verify permission
+            if (!await _authService.HasPermissionAsync(authContext, PluginPermissions.ManageState))
+            {
+                _logger.LogWarning("Unauthorized attempt to enable plugin {Id} by user {User}", 
+                    pluginId, authContext.UserName);
+                await _authService.LogAuditEventAsync(pluginId, "Enable", authContext, false);
+                return false;
+            }
+
+            // Verify permission
+            if (!await _authService.HasPermissionAsync(authContext, PluginPermissions.ManageState))
+            {
+                _logger.LogWarning("Unauthorized attempt to disable plugin {Id} by user {User}", 
+                    pluginId, authContext.UserName);
+                await _authService.LogAuditEventAsync(pluginId, "Disable", authContext, false);
+                return false;
+            }
+
+            // Verify permission
+            if (!await _authService.HasPermissionAsync(authContext, PluginPermissions.Update))
+            {
+                _logger.LogWarning("Unauthorized attempt to reload plugin {Id} by user {User}", 
+                    pluginId, authContext.UserName);
+                await _authService.LogAuditEventAsync(pluginId, "Reload", authContext, false);
+                return false;
+            }
+            
             if (!_plugins.TryGetValue(pluginId, out var plugin))
             {
                 _logger.LogWarning("Plugin not found: {Id}", pluginId);
@@ -184,6 +231,8 @@ public class PluginManager : IPluginManager
             if (_enabledPlugins.Contains(pluginId))
             {
                 _logger.LogInformation("Plugin already enabled: {Id}", pluginId);
+                await _authService.LogAuditEventAsync(pluginId, "Enable", authContext, true);
+                await _authService.LogAuditEventAsync(pluginId, "Disable", authContext, true);
                 return true;
             }
 
@@ -218,7 +267,7 @@ public class PluginManager : IPluginManager
         }
     }
 
-    public async Task<bool> DisablePluginAsync(string pluginId)
+    public async Task<bool> DisablePluginAsync(string pluginId, PluginAuthContext authContext)
     {
         await _reloadLock.WaitAsync();
         try
@@ -314,7 +363,7 @@ public class PluginManager : IPluginManager
         }
     }
 
-    public async Task<bool> ReloadPluginAsync(string pluginId)
+    public async Task<bool> ReloadPluginAsync(string pluginId, PluginAuthContext authContext)
     {
         await _reloadLock.WaitAsync();
         try
@@ -392,19 +441,43 @@ public class PluginManager : IPluginManager
         }
     }
 
-    public Task<PluginHealthStatus> GetPluginHealthAsync(string pluginId)
+    public async Task<PluginHealthStatus> GetPluginHealthAsync(string pluginId, PluginAuthContext authContext)
     {
+        // Verify permission
+        if (!await _authService.HasPermissionAsync(authContext, PluginPermissions.ViewHealth))
+        {
+            _logger.LogWarning("Unauthorized attempt to view plugin health {Id} by user {User}", 
+                pluginId, authContext.UserName);
+            await _authService.LogAuditEventAsync(pluginId, "ViewHealth", authContext, false);
+            return new PluginHealthStatus
+            {
+                PluginId = pluginId,
+                State = PluginState.Unknown
+            };
+        }
+
         var status = _healthMonitor.GetPluginHealth(pluginId);
-        return Task.FromResult(status ?? new PluginHealthStatus
+        await _authService.LogAuditEventAsync(pluginId, "ViewHealth", authContext, true);
+        return status ?? new PluginHealthStatus
         {
             PluginId = pluginId,
             State = PluginState.Unknown
         });
     }
 
-    public Task<IEnumerable<PluginHealthStatus>> GetAllPluginsHealthAsync()
+    public async Task<IEnumerable<PluginHealthStatus>> GetAllPluginsHealthAsync(PluginAuthContext authContext)
     {
-        return Task.FromResult(_healthMonitor.GetAllPluginsHealth());
+        // Verify permission
+        if (!await _authService.HasPermissionAsync(authContext, PluginPermissions.ViewHealth))
+        {
+            _logger.LogWarning("Unauthorized attempt to view all plugin health by user {User}", 
+                authContext.UserName);
+            await _authService.LogAuditEventAsync("*", "ViewAllHealth", authContext, false);
+            return Enumerable.Empty<PluginHealthStatus>();
+        }
+
+        await _authService.LogAuditEventAsync("*", "ViewAllHealth", authContext, true);
+        return _healthMonitor.GetAllPluginsHealth();
     }
 
     private async void HandlePluginFileChange(string pluginPath)
