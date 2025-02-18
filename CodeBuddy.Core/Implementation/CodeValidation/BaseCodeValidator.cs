@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Runtime.CompilerServices;
 using CodeBuddy.Core.Models;
+using CodeBuddy.Core.Implementation.CodeValidation.MemoryManagement;
 using Microsoft.Extensions.Logging;
 
 namespace CodeBuddy.Core.Implementation.CodeValidation;
@@ -90,8 +91,8 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     private readonly PerformanceMonitor _performanceMonitor = new();
     private readonly List<string> _temporaryFiles = new();
     private readonly ResourceUsageTracker _resourceTracker;
-    private readonly ObjectPool<byte[]> _bufferPool;
-    private readonly MemoryPressureMonitor _memoryMonitor;
+    private readonly MemoryPoolManager _memoryManager;
+    private readonly ValidationContextPool _contextPool;
     
     // Enhanced memory thresholds with progressive cleanup
     private const long LowMemoryThresholdBytes = 300 * 1024 * 1024; // 300MB
@@ -119,17 +120,14 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
     {
         _logger = logger;
         _resourceTracker = new ResourceUsageTracker();
-        _memoryMonitor = new MemoryPressureMonitor(logger, OnMemoryPressureChanged);
-        _bufferPool = ObjectPool.Create<byte[]>();
+        _memoryManager = new MemoryPoolManager(logger);
+        _contextPool = new ValidationContextPool(_memoryManager);
         _progress = new FileOperationProgress();
         _validationQueue = new BlockingCollection<ValidationTask>(MaxQueueSize);
         _queueProcessingCts = new CancellationTokenSource();
         
         // Start queue processing
         _queueProcessingTask = ProcessValidationQueueAsync(_queueProcessingCts.Token);
-        
-        // Register memory pressure listener
-        GC.AddMemoryPressureListener(OnMemoryPressure);
         
         // Start resource monitoring
         StartResourceMonitoring();
@@ -686,6 +684,12 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
             
             await _cleanupLock.WaitAsync().ConfigureAwait(false);
             
+            // Dispose context pool
+            _contextPool.Dispose();
+            
+            // Dispose memory manager (will handle all pooled resources)
+            await _memoryManager.DisposeAsync().ConfigureAwait(false);
+            
             // Dispose all tracked disposables
             while (_disposables.TryDequeue(out var disposable))
             {
@@ -704,9 +708,6 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
 
             // Clean up temporary files
             await CleanupTemporaryFilesAsync().ConfigureAwait(false);
-            
-            // Release memory pressure listener
-            GC.RemoveMemoryPressureListener(OnMemoryPressure);
             
             // Dispose queues and other resources
             _validationQueue.Dispose();
@@ -751,10 +752,18 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
 
     private void OnMemoryPressure(GCMemoryPressureSource source, GCMemoryPressureLevel pressureLevel)
     {
-        if (pressureLevel >= GCMemoryPressureLevel.Medium)
+        // Let the MemoryPoolManager handle memory pressure
+        Task.Run(async () =>
         {
-            Task.Run(EmergencyCleanupAsync).ConfigureAwait(false);
-        }
+            if (pressureLevel >= GCMemoryPressureLevel.Medium)
+            {
+                await EmergencyCleanupAsync();
+            }
+            else
+            {
+                await _memoryManager.HandleMemoryPressureAsync(pressureLevel);
+            }
+        }).ConfigureAwait(false);
     }
 
     private async Task MonitorResourcesAsync(CancellationToken cancellationToken)
@@ -849,7 +858,9 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
             // Clear all queues and caches
             while (_validationQueue.TryTake(out _)) { }
             _phaseStopwatches.Clear();
-            _bufferPool.Clear();
+            
+            // Force cleanup of memory pools
+            await _memoryManager.DisposeAsync();
             
             // Cleanup all temporary resources
             await CleanupTemporaryFilesAsync();
@@ -871,14 +882,15 @@ public abstract class BaseCodeValidator : ICodeValidator, IDisposable, IAsyncDis
             }
             
             // Force garbage collection
-            for (int i = 0; i < 2; i++)
-            {
-                GC.Collect(2, GCCollectionMode.Aggressive, true);
-                GC.WaitForPendingFinalizers();
-            }
+            GC.Collect(2, GCCollectionMode.Aggressive, true);
+            GC.WaitForPendingFinalizers();
             
             // Allow system to stabilize
             await Task.Delay(200);
+            
+            // Reinitialize memory manager and context pool
+            _memoryManager = new MemoryPoolManager(_logger);
+            _contextPool = new ValidationContextPool(_memoryManager);
             
             // Reset validation queue
             _validationQueue.Dispose();
