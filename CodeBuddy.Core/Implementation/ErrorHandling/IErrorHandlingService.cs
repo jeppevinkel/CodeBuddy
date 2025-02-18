@@ -6,10 +6,40 @@ using CodeBuddy.Core.Models.Errors;
 namespace CodeBuddy.Core.Implementation.ErrorHandling
 {
     /// <summary>
-    /// Interface for the error handling service
+    /// Interface for the error handling service with retry and recovery capabilities
     /// </summary>
     public interface IErrorHandlingService
     {
+        /// <summary>
+        /// Gets or sets the retry policy for error handling
+        /// </summary>
+        RetryPolicy RetryPolicy { get; set; }
+
+        /// <summary>
+        /// Registers an error recovery strategy
+        /// </summary>
+        void RegisterRecoveryStrategy(IErrorRecoveryStrategy strategy);
+
+        /// <summary>
+        /// Attempts to recover from an error using registered strategies
+        /// </summary>
+        Task<bool> AttemptRecoveryAsync(ValidationError error);
+
+        /// <summary>
+        /// Gets the current circuit breaker status for an error category
+        /// </summary>
+        CircuitBreakerStatus GetCircuitBreakerStatus(ErrorCategory category);
+
+        /// <summary>
+        /// Resets the circuit breaker for an error category
+        /// </summary>
+        void ResetCircuitBreaker(ErrorCategory category);
+
+        /// <summary>
+        /// Gets the recovery history for a specific error
+        /// </summary>
+        List<RecoveryAttemptResult> GetRecoveryHistory(string errorCode);
+
         /// <summary>
         /// Handles a validation error and performs appropriate actions
         /// </summary>
