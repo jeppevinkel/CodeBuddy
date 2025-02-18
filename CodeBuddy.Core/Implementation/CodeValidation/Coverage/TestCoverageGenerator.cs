@@ -21,12 +21,14 @@ public class TestCoverageGenerator : ITestCoverageGenerator
     private readonly ICoverageReportRenderer _reportRenderer;
     private readonly ICoverageTrendAnalyzer _trendAnalyzer;
     private readonly IRecommendationEngine _recommendationEngine;
+    private readonly CoverageThresholdConfig _thresholdConfig;
 
     public TestCoverageGenerator(
         ICoverageDataCollector dataCollector,
         ICoverageReportRenderer reportRenderer,
         ICoverageTrendAnalyzer trendAnalyzer,
-        IRecommendationEngine recommendationEngine)
+        IRecommendationEngine recommendationEngine,
+        CoverageThresholdConfig thresholdConfig)
     {
         _dataCollector = dataCollector;
         _reportRenderer = reportRenderer;
@@ -72,24 +74,94 @@ public class TestCoverageGenerator : ITestCoverageGenerator
     {
         var validation = new CoverageValidationResult
         {
-            ThresholdPercentage = 80.0, // Default threshold, should be configurable
-            ModuleThresholds = new Dictionary<string, double>()
+            ThresholdPercentage = _thresholdConfig.MinimumOverallCoverage,
+            ModuleThresholds = _thresholdConfig.ModuleThresholds.ToDictionary(
+                kvp => kvp.Key,
+                kvp => kvp.Value.MinimumCoverage)
         };
 
-        // Validate overall coverage
-        validation.MeetsThreshold = report.OverallCoveragePercentage >= validation.ThresholdPercentage;
+        // Validate overall coverage requirements
+        validation.MeetsThreshold = ValidateOverallCoverage(report);
+        
+        // Validate branch and statement coverage
+        var branchCoverageValid = report.BranchCoverage.BranchCoveragePercentage >= _thresholdConfig.MinimumBranchCoverage;
+        var statementCoverageValid = report.StatementCoverage.StatementCoveragePercentage >= _thresholdConfig.MinimumStatementCoverage;
+        
+        validation.DetailedValidation = new Dictionary<string, bool>
+        {
+            { "OverallCoverage", validation.MeetsThreshold },
+            { "BranchCoverage", branchCoverageValid },
+            { "StatementCoverage", statementCoverageValid }
+        };
 
         // Validate per-module coverage
-        validation.ModulesBelowThreshold = report.CoverageByModule
-            .Where(m => m.Value.CoveragePercentage < validation.ThresholdPercentage)
-            .Select(m => m.Key)
-            .ToList();
+        validation.ModulesBelowThreshold = ValidateModuleCoverage(report);
+        
+        // Handle legacy code if enabled
+        if (_thresholdConfig.LegacyCodeSettings.EnableLegacyCodeDifferentiation)
+        {
+            validation.LegacyCodeValidation = ValidateLegacyCode(report);
+        }
+
+        // Apply exclusions
+        ApplyExclusions(validation);
 
         // Generate improvement suggestions
         validation.ImprovementSuggestions = await _recommendationEngine
             .GenerateRecommendationsAsync(report, validation.ModulesBelowThreshold);
 
         result.CoverageValidation = validation;
+    }
+
+    private bool ValidateOverallCoverage(TestCoverageReport report)
+    {
+        return report.OverallCoveragePercentage >= _thresholdConfig.MinimumOverallCoverage;
+    }
+
+    private List<string> ValidateModuleCoverage(TestCoverageReport report)
+    {
+        var modulesBelowThreshold = new List<string>();
+
+        foreach (var module in report.CoverageByModule)
+        {
+            var threshold = _thresholdConfig.ModuleThresholds.TryGetValue(module.Key, out var moduleConfig)
+                ? moduleConfig.MinimumCoverage
+                : _thresholdConfig.MinimumOverallCoverage;
+
+            if (module.Value.CoveragePercentage < threshold)
+            {
+                modulesBelowThreshold.Add(module.Key);
+            }
+        }
+
+        return modulesBelowThreshold;
+    }
+
+    private Dictionary<string, bool> ValidateLegacyCode(TestCoverageReport report)
+    {
+        var validation = new Dictionary<string, bool>();
+        var legacyThreshold = _thresholdConfig.LegacyCodeSettings.LegacyCodeMinimumCoverage;
+        var newCodeThreshold = _thresholdConfig.LegacyCodeSettings.NewCodeMinimumCoverage;
+        var ageThreshold = DateTime.Now.AddDays(-_thresholdConfig.LegacyCodeSettings.LegacyCodeAgeThresholdDays);
+
+        foreach (var trend in report.CoverageTrends)
+        {
+            var isLegacy = trend.Timestamp < ageThreshold;
+            var threshold = isLegacy ? legacyThreshold : newCodeThreshold;
+            validation[trend.CommitId] = trend.OverallCoverage >= threshold;
+        }
+
+        return validation;
+    }
+
+    private void ApplyExclusions(CoverageValidationResult validation)
+    {
+        if (_thresholdConfig.Exclusions?.ExcludedPaths == null) return;
+
+        validation.ModulesBelowThreshold = validation.ModulesBelowThreshold
+            .Where(module => !_thresholdConfig.Exclusions.ExcludedPaths.Any(path => 
+                module.StartsWith(path, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
     }
 }
 

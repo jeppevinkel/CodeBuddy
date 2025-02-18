@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Coverage Report</title>
+    <style>
+        :root {
+            --primary-color: #2c3e50;
+            --success-color: #27ae60;
+            --warning-color: #f39c12;
+            --danger-color: #c0392b;
+            --text-color: #34495e;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            line-height: 1.6;
+            color: var(--text-color);
+            margin: 0;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        
+        .summary-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .metric {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        
+        .metric.success { color: var(--success-color); }
+        .metric.warning { color: var(--warning-color); }
+        .metric.danger { color: var(--danger-color); }
+        
+        .module-coverage {
+            margin-bottom: 40px;
+        }
+        
+        .module-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        
+        .module-table th,
+        .module-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        
+        .module-table th {
+            background-color: var(--primary-color);
+            color: white;
+        }
+        
+        .progress-bar {
+            background-color: #eee;
+            height: 20px;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background-color: var(--success-color);
+            transition: width 0.3s ease;
+        }
+        
+        .recommendations {
+            margin-top: 40px;
+        }
+        
+        .recommendation-item {
+            background: #f8f9fa;
+            border-left: 4px solid var(--primary-color);
+            margin-bottom: 15px;
+            padding: 15px;
+        }
+        
+        .trends-chart {
+            margin-top: 40px;
+            height: 400px;
+        }
+        
+        @media (max-width: 768px) {
+            .summary-cards {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Test Coverage Report</h1>
+            <p class="date">Generated on {{GENERATION_DATE}}</p>
+        </div>
+        
+        <div class="summary-cards">
+            <div class="card">
+                <h3>Overall Coverage</h3>
+                <div class="metric {{OVERALL_COVERAGE_CLASS}}">{{OVERALL_COVERAGE}}%</div>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: {{OVERALL_COVERAGE}}%"></div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>Branch Coverage</h3>
+                <div class="metric {{BRANCH_COVERAGE_CLASS}}">{{BRANCH_COVERAGE}}%</div>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: {{BRANCH_COVERAGE}}%"></div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>Statement Coverage</h3>
+                <div class="metric {{STATEMENT_COVERAGE_CLASS}}">{{STATEMENT_COVERAGE}}%</div>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: {{STATEMENT_COVERAGE}}%"></div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="module-coverage">
+            <h2>Module Coverage Details</h2>
+            <table class="module-table">
+                <thead>
+                    <tr>
+                        <th>Module</th>
+                        <th>Coverage</th>
+                        <th>Threshold</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{MODULE_COVERAGE_ROWS}}
+                </tbody>
+            </table>
+        </div>
+        
+        <div class="trends-chart">
+            <h2>Coverage Trends</h2>
+            <canvas id="trendsChart"></canvas>
+        </div>
+        
+        <div class="recommendations">
+            <h2>Recommendations</h2>
+            {{RECOMMENDATIONS}}
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        // Trends chart initialization
+        const ctx = document.getElementById('trendsChart').getContext('2d');
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: {{TREND_LABELS}},
+                datasets: [{
+                    label: 'Overall Coverage',
+                    data: {{TREND_DATA}},
+                    borderColor: '#2c3e50',
+                    tension: 0.1
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        max: 100
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>
