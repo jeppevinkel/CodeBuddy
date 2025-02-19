@@ -1,160 +1,147 @@
-# Configuration System
+# Configuration Validation System
 
-CodeBuddy uses a robust configuration system that provides schema-based validation, type safety, and version control for all configuration sections.
+The CodeBuddy configuration system provides robust validation and versioning capabilities to ensure reliable configuration management across different environments and versions.
 
-## Key Features
+## Configuration Schema Versioning
 
-1. **Schema-based Validation**
-   - Each configuration section has a defined schema with validation rules
-   - Supports required fields, ranges, patterns, and custom validation
-   - Automatic validation on load and save
-
-2. **Type-safe Configuration**
-   - Strongly-typed configuration classes
-   - Compile-time type checking
-   - IntelliSense support in editors
-
-3. **Validation Framework**
-   - Attribute-based validation rules
-   - Custom validation logic support
-   - Hierarchical validation (base + derived)
-   - Severity levels (Error, Warning, Information)
-
-4. **Version Control**
-   - Schema versioning for configuration sections
-   - Migration paths for configuration updates
-   - Backward compatibility support
-   - Configuration backups
-
-5. **Environment Support**
-   - Environment-specific overrides
-   - Development/Staging/Production configurations
-   - Secure sensitive settings
-
-6. **Health Monitoring**
-   - Periodic configuration validation
-   - Validation error reporting
-   - Configuration change tracking
-   - Performance monitoring
-
-## Usage Example
+Configurations are versioned using the `SchemaVersionAttribute`:
 
 ```csharp
-// Define a configuration section
-[ConfigurationSection("MyFeature", "Configuration for MyFeature", version: 1)]
-public class MyFeatureConfiguration : BaseConfiguration
+[SchemaVersion("2.0")]
+public class ValidationConfiguration : BaseConfiguration
 {
-    [ConfigurationItem("Maximum items allowed", required: true, defaultValue: "100")]
-    [RangeValidation(1, 1000)]
-    public int MaxItems { get; set; } = 100;
-
-    [ConfigurationItem("API endpoint", required: true)]
-    [PatternValidation(@"^https?://.*$", "Must be a valid HTTP/HTTPS URL")]
-    public string ApiEndpoint { get; set; }
-
-    public override IEnumerable<string> Validate()
-    {
-        var errors = new List<string>(base.Validate());
-        
-        // Custom validation logic
-        if (MaxItems > 500 && !ApiEndpoint.StartsWith("https://"))
-        {
-            errors.Add("HTTPS is required for high-volume endpoints");
-        }
-        
-        return errors;
-    }
-}
-
-// Use the configuration
-public class MyFeature
-{
-    private readonly MyFeatureConfiguration _config;
-    
-    public MyFeature(IConfigurationManager configManager)
-    {
-        _config = await configManager.GetConfiguration<MyFeatureConfiguration>("MyFeature");
-    }
+    // Configuration properties
 }
 ```
 
-## Validation Attributes
+## Validation Rules
 
-1. **ConfigurationSectionAttribute**
-   - Defines a configuration section
-   - Specifies name, description, and version
+### Built-in Validation Attributes
 
-2. **ConfigurationItemAttribute**
-   - Defines a configuration item
-   - Specifies description, required status, and default value
-
-3. **RangeValidationAttribute**
-   - Validates numeric ranges
-   - Supports min/max values
-
-4. **PatternValidationAttribute**
-   - Validates string patterns
-   - Uses regular expressions
-
-5. **CustomValidationAttribute**
-   - Implements custom validation logic
-   - Full control over validation rules
-
-## Best Practices
-
-1. **Configuration Structure**
-   - Keep configuration sections focused and cohesive
-   - Use meaningful names and descriptions
-   - Document all configuration options
-
-2. **Validation Rules**
-   - Use appropriate validation attributes
-   - Implement custom validation when needed
-   - Consider performance implications
-
-3. **Versioning**
-   - Increment version for breaking changes
-   - Provide migration paths
-   - Document changes
-
-4. **Security**
-   - Protect sensitive configuration
-   - Use secure transport for remote configuration
-   - Validate all inputs
-
-5. **Monitoring**
-   - Monitor configuration health
-   - Set up alerts for validation failures
-   - Track configuration changes
-
-## Migration Guide
-
-When updating configuration schemas:
-
-1. Create a new version of the configuration class
-2. Implement migration logic in ConfigurationMigrationManager
-3. Test migration with sample configurations
-4. Document changes and migration path
-5. Deploy with backward compatibility
+- `Required` - Marks a property as required
+- `Range` - Specifies numeric range constraints
+- `MinLength` - Specifies minimum length for collections
+- `EnvironmentSpecific` - Restricts values to specific environments
+- `SensitiveData` - Marks properties containing sensitive data
+- `Reloadable` - Indicates properties that can be modified at runtime
+- `RequiresBackup` - Requires backup before modification
+- `ValidEnumValues` - Validates enum values
 
 Example:
 ```csharp
-public class ConfigurationV2Migration : IConfigurationMigration
+public class ValidationConfiguration : BaseConfiguration
 {
-    public int FromVersion => 1;
-    public int ToVersion => 2;
-    
-    public object Migrate(object oldConfig)
+    [Required]
+    [Range(1, 10)]
+    public int MaxConcurrentValidations { get; set; }
+
+    [EnvironmentSpecific("Development", "Staging", "Production")]
+    public Dictionary<string, int> ResourceLimits { get; set; }
+
+    [SensitiveData]
+    public string? ValidationApiKey { get; set; }
+}
+```
+
+## Configuration Migration
+
+### Version Migration
+
+When configuration schema changes, create a migration class:
+
+```csharp
+public class ValidationConfigV1ToV2Migration : IConfigurationMigration
+{
+    public string FromVersion => "1.0";
+    public string ToVersion => "2.0";
+
+    public object Migrate(object configuration)
     {
-        var v1 = (MyFeatureConfigurationV1)oldConfig;
-        return new MyFeatureConfigurationV2
-        {
-            MaxItems = v1.MaxItems,
-            ApiEndpoint = v1.ApiEndpoint,
-            // New properties with defaults
-            RetryCount = 3,
-            Timeout = TimeSpan.FromSeconds(30)
-        };
+        var v1Config = (ValidationConfiguration)configuration;
+        // Perform migration logic
+        return v1Config;
+    }
+
+    public ValidationResult Validate(object configuration)
+    {
+        // Validate configuration before migration
+        return ValidationResult.Success();
     }
 }
 ```
+
+Register the migration:
+```csharp
+var migrationManager = new ConfigurationMigrationManager();
+migrationManager.RegisterMigration<ValidationConfiguration>(new ValidationConfigV1ToV2Migration());
+```
+
+### Backup and Rollback
+
+Configurations are automatically backed up before migrations:
+- Backups stored in `config/backups` directory
+- Naming format: `{ConfigName}_v{Version}_{Timestamp}.json`
+- Automatic rollback on migration failure
+
+## Configuration Health Checks
+
+The `SystemHealthDashboard` monitors configuration health:
+- Schema version validation
+- Configuration integrity checks
+- Migration history tracking
+- Environment-specific validation
+- Resource limit monitoring
+
+## Plugin Developer Guidelines
+
+### Creating Plugin Configurations
+
+1. Inherit from `BaseConfiguration`
+2. Use schema versioning
+3. Apply validation attributes
+4. Implement custom validation logic
+
+Example:
+```csharp
+[SchemaVersion("1.0")]
+public class PluginConfiguration : BaseConfiguration
+{
+    [Required]
+    public string PluginName { get; set; }
+
+    [EnvironmentSpecific("Development", "Production")]
+    public Dictionary<string, string> Settings { get; set; }
+
+    public override ValidationResult? Validate()
+    {
+        var baseResult = base.Validate();
+        if (baseResult?.ValidationResult != ValidationResult.Success)
+        {
+            return baseResult;
+        }
+
+        // Custom validation logic
+        return ValidationResult.Success;
+    }
+}
+```
+
+### Configuration Migration
+
+1. Create migration class implementing `IConfigurationMigration`
+2. Register migration with `ConfigurationMigrationManager`
+3. Test migration paths
+4. Document breaking changes
+
+## Best Practices
+
+1. Always version configurations
+2. Use appropriate validation attributes
+3. Implement custom validation when needed
+4. Create migrations for breaking changes
+5. Test configurations across environments
+6. Document configuration requirements
+7. Monitor configuration health
+8. Backup sensitive configurations
+9. Use environment-specific validation
+10. Handle migration failures gracefully

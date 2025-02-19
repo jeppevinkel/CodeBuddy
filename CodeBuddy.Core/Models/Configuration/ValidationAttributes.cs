@@ -1,110 +1,109 @@
 using System;
 using System.ComponentModel.DataAnnotations;
+using System.Linq;
 
 namespace CodeBuddy.Core.Models.Configuration
 {
     /// <summary>
-    /// Marks a configuration property as sensitive, indicating it should be stored securely
+    /// Marks a property as environment-specific with allowed environments
     /// </summary>
     [AttributeUsage(AttributeTargets.Property)]
-    public class SensitiveDataAttribute : ValidationAttribute
-    {
-        public override bool IsValid(object value)
-        {
-            return true; // Just marks for secure storage, doesn't validate
-        }
-    }
-
-    /// <summary>
-    /// Indicates a property requires specific environment variables to be set
-    /// </summary>
-    [AttributeUsage(AttributeTargets.Property)]
-    public class RequiresEnvironmentAttribute : ValidationAttribute
-    {
-        private readonly string[] _requiredVars;
-
-        public RequiresEnvironmentAttribute(params string[] envVars)
-        {
-            _requiredVars = envVars;
-        }
-
-        public override bool IsValid(object value)
-        {
-            foreach (var env in _requiredVars)
-            {
-                if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable(env)))
-                {
-                    ErrorMessage = $"Environment variable {env} is required but not set";
-                    return false;
-                }
-            }
-            return true;
-        }
-    }
-
-    /// <summary>
-    /// Validates a configuration value against command line arguments
-    /// </summary>
-    [AttributeUsage(AttributeTargets.Property)]
-    public class CommandLineOverrideAttribute : ValidationAttribute
-    {
-        public string ArgumentName { get; }
-        public bool Required { get; }
-
-        public CommandLineOverrideAttribute(string argumentName, bool required = false)
-        {
-            ArgumentName = argumentName;
-            Required = required;
-        }
-    }
-
-    /// <summary>
-    /// Indicates configuration values that should be reloaded when changed
-    /// </summary>
-    [AttributeUsage(AttributeTargets.Property)]
-    public class ReloadableAttribute : Attribute
-    {
-        public int PollInterval { get; }
-
-        public ReloadableAttribute(int pollIntervalSeconds = 30)
-        {
-            PollInterval = pollIntervalSeconds;
-        }
-    }
-
-    /// <summary>
-    /// Specifies valid configuration value ranges
-    /// </summary>
-    [AttributeUsage(AttributeTargets.Property)]
-    public class ConfigurationRangeAttribute : RangeAttribute
-    {
-        public ConfigurationRangeAttribute(double minimum, double maximum) 
-            : base(minimum, maximum)
-        {
-        }
-
-        public ConfigurationRangeAttribute(int minimum, int maximum) 
-            : base(minimum, maximum)
-        {
-        }
-
-        public ConfigurationRangeAttribute(Type type, string minimum, string maximum) 
-            : base(type, minimum, maximum)
-        {
-        }
-    }
-
-    /// <summary>
-    /// Marks configuration values that are environment-specific
-    /// </summary>
-    [AttributeUsage(AttributeTargets.Property)]
-    public class EnvironmentSpecificAttribute : Attribute
+    public class EnvironmentSpecificAttribute : ValidationAttribute
     {
         public string[] Environments { get; }
 
         public EnvironmentSpecificAttribute(params string[] environments)
         {
             Environments = environments;
+        }
+
+        protected override ValidationResult? IsValid(object? value, ValidationContext validationContext)
+        {
+            if (value == null) return ValidationResult.Success;
+
+            var currentEnv = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
+            if (string.IsNullOrEmpty(currentEnv)) return ValidationResult.Success;
+
+            if (!Environments.Contains(currentEnv, StringComparer.OrdinalIgnoreCase))
+            {
+                return new ValidationResult(
+                    $"Property {validationContext.MemberName} is not valid for environment {currentEnv}. " +
+                    $"Allowed environments: {string.Join(", ", Environments)}");
+            }
+
+            return ValidationResult.Success;
+        }
+    }
+
+    /// <summary>
+    /// Marks a property as reloadable at runtime
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property)]
+    public class ReloadableAttribute : Attribute
+    {
+    }
+
+    /// <summary>
+    /// Marks a property as containing sensitive data that should be encrypted
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property)]
+    public class SensitiveDataAttribute : ValidationAttribute
+    {
+        protected override ValidationResult? IsValid(object? value, ValidationContext validationContext)
+        {
+            if (value == null) return ValidationResult.Success;
+
+            var stringValue = value.ToString();
+            if (string.IsNullOrEmpty(stringValue)) return ValidationResult.Success;
+
+            // Check if value appears to be unencrypted
+            if (stringValue.StartsWith("$"))
+            {
+                return new ValidationResult(
+                    $"Property {validationContext.MemberName} contains sensitive data that must be encrypted");
+            }
+
+            return ValidationResult.Success;
+        }
+    }
+
+    /// <summary>
+    /// Marks a property as requiring a backup before modifications
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property)]
+    public class RequiresBackupAttribute : Attribute
+    {
+    }
+
+    /// <summary>
+    /// Specifies valid values for an enum property
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property)]
+    public class ValidEnumValuesAttribute : ValidationAttribute
+    {
+        private readonly Type _enumType;
+
+        public ValidEnumValuesAttribute(Type enumType)
+        {
+            if (!enumType.IsEnum)
+            {
+                throw new ArgumentException("Type must be an enum", nameof(enumType));
+            }
+            _enumType = enumType;
+        }
+
+        protected override ValidationResult? IsValid(object? value, ValidationContext validationContext)
+        {
+            if (value == null) return ValidationResult.Success;
+
+            if (!Enum.IsDefined(_enumType, value))
+            {
+                return new ValidationResult(
+                    $"Value {value} is not valid for enum {_enumType.Name}. " +
+                    $"Valid values: {string.Join(", ", Enum.GetNames(_enumType))}");
+            }
+
+            return ValidationResult.Success;
         }
     }
 }
