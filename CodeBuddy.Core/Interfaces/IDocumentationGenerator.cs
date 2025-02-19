@@ -4,50 +4,57 @@ using CodeBuddy.Core.Models.Documentation;
 namespace CodeBuddy.Core.Interfaces
 {
     /// <summary>
-    /// Interface for the comprehensive documentation generation system
+    /// Interface for generating comprehensive documentation
     /// </summary>
     public interface IDocumentationGenerator
     {
         /// <summary>
-        /// Generates comprehensive API documentation for the codebase including XML docs,
-        /// method signatures, and cross-references
+        /// Generates complete API documentation for the codebase
         /// </summary>
         Task<DocumentationResult> GenerateApiDocumentationAsync();
-
+        
         /// <summary>
-        /// Generates documentation for the plugin system including configuration templates
-        /// and developer guidelines
+        /// Generates documentation for the plugin system
         /// </summary>
         Task<DocumentationResult> GeneratePluginDocumentationAsync();
-
+        
         /// <summary>
-        /// Generates documentation for the validation pipeline including error handling
-        /// and performance guidelines
+        /// Generates documentation for the validation pipeline
         /// </summary>
         Task<DocumentationResult> GenerateValidationDocumentationAsync();
-
+        
         /// <summary>
-        /// Extracts and validates code examples from test cases and documentation
+        /// Generates comprehensive documentation for features and architecture.
         /// </summary>
-        Task<List<CodeExample>> ExtractCodeExamplesAsync();
-
+        Task<DocumentationResult> GenerateFeatureDocumentationAsync();
+        
         /// <summary>
-        /// Validates documentation coverage and accuracy across the codebase
+        /// Generates documentation for configuration options.
+        /// </summary>
+        Task<DocumentationResult> GenerateConfigurationDocumentationAsync();
+        
+        /// <summary>
+        /// Generates TypeScript type definitions from C# code.
+        /// </summary>
+        Task<DocumentationResult> GenerateTypeScriptDefinitionsAsync();
+        
+        /// <summary>
+        /// Validates the generated documentation
         /// </summary>
         Task<DocumentationValidationResult> ValidateDocumentationAsync();
-
+        
         /// <summary>
-        /// Generates cross-reference links between related components
+        /// Generates cross-references between documentation elements
         /// </summary>
         Task<CrossReferenceResult> GenerateCrossReferencesAsync();
-
+        
         /// <summary>
-        /// Analyzes XML documentation coverage and completeness
+        /// Analyzes documentation coverage
         /// </summary>
         Task<DocumentationCoverageResult> AnalyzeDocumentationCoverageAsync();
-
+        
         /// <summary>
-        /// Generates resource management and usage pattern documentation
+        /// Generates documentation for resource management patterns
         /// </summary>
         Task<ResourcePatternDocumentation> GenerateResourcePatternsAsync();
     }

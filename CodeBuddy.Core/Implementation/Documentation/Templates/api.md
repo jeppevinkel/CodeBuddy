@@ -1,72 +1,43 @@
-# {{ApiName}}
+# {{name}}
 
-{{Description}}
+**Namespace:** {{namespace}}
 
-## Overview
+{{description}}
 
-{{Overview}}
+## Interfaces
+{{#each interfaces}}
+- {{this}}
+{{/each}}
 
-## Installation
-
-```bash
-dotnet add package CodeBuddy
-```
-
-## Basic Usage
-
-```csharp
-{{BasicUsageExample}}
-```
-
-## API Reference
-
-{{#each Types}}
-### {{Name}}
-
-{{Description}}
-
-#### Properties
-
+## Properties
 | Name | Type | Description |
 |------|------|-------------|
-{{#each Properties}}
-| {{Name}} | {{Type}} | {{Description}} |
+{{#each properties}}
+| {{name}} | {{type}} | {{description}} |
 {{/each}}
 
-#### Methods
+## Methods
+{{#each methods}}
+### {{name}}
 
-{{#each Methods}}
-##### {{Name}}
+{{description}}
 
-{{Description}}
-
-Parameters:
-{{#each Parameters}}
-- `{{Name}}` ({{Type}}): {{Description}}
+#### Parameters
+| Name | Type | Description | Required | Default |
+|------|------|-------------|----------|---------|
+{{#each parameters}}
+| {{name}} | {{type}} | {{description}} | {{#if isOptional}}No{{else}}Yes{{/if}} | {{defaultValue}} |
 {{/each}}
 
-Returns: {{ReturnType}}
+#### Returns
+{{returnType}}
 
-Example:
-```csharp
-{{Example}}
+{{#if examples}}
+#### Examples
+{{#each examples}}
+```{{language}}
+{{code}}
 ```
 {{/each}}
-
+{{/if}}
 {{/each}}
-
-## Advanced Usage
-
-{{AdvancedUsage}}
-
-## Best Practices
-
-{{BestPractices}}
-
-## Common Issues and Solutions
-
-{{Troubleshooting}}
-
-## Related Resources
-
-{{RelatedResources}}

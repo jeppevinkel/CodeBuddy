@@ -1,110 +1,40 @@
-# {{PluginName}}
+# {{name}} Plugin
 
-{{Description}}
+Version: {{version}}
 
-## Overview
+{{description}}
 
-{{Overview}}
-
-## Features
-
-{{#each Features}}
-- {{Name}}: {{Description}}
+## Dependencies
+{{#each dependencies}}
+- {{this}}
 {{/each}}
-
-## Installation
-
-```bash
-dotnet add package {{PackageName}}
-```
 
 ## Configuration
-
 ```json
-{{ConfigurationExample}}
+{{{configuration}}}
 ```
 
-### Configuration Options
+## Interfaces
+{{#each interfaces}}
+### {{name}}
 
-| Option | Type | Required | Default | Description |
-|--------|------|-----------|---------|-------------|
-{{#each ConfigurationOptions}}
-| {{Name}} | {{Type}} | {{Required}} | {{Default}} | {{Description}} |
-{{/each}}
-
-## Usage
-
-### Basic Usage
-
-```csharp
-{{BasicUsageExample}}
-```
-
-### Advanced Scenarios
-
-{{#each AdvancedScenarios}}
-#### {{Name}}
-
-{{Description}}
-
-```csharp
-{{Example}}
-```
-{{/each}}
-
-## API Reference
-
-{{#each Types}}
-### {{Name}}
-
-{{Description}}
+{{description}}
 
 #### Methods
+{{#each methods}}
+##### {{name}}
 
-{{#each Methods}}
-##### {{Name}}
-
-{{Description}}
-
-Parameters:
-{{#each Parameters}}
-- `{{Name}}` ({{Type}}): {{Description}}
-{{/each}}
-
-Returns: {{ReturnType}}
+{{description}}
 {{/each}}
 {{/each}}
 
 ## Examples
+{{#each examples}}
+### {{title}}
 
-{{#each Examples}}
-### {{Name}}
+{{description}}
 
-{{Description}}
-
-```csharp
-{{Code}}
+```{{language}}
+{{code}}
 ```
-{{/each}}
-
-## Troubleshooting
-
-{{#each TroubleshootingItems}}
-### {{Problem}}
-
-{{Solution}}
-{{/each}}
-
-## Best Practices
-
-{{BestPractices}}
-
-## Version History
-
-{{#each Versions}}
-### {{Version}} ({{Date}})
-
-{{#each Changes}}
-- {{this}}
-{{/each}}
 {{/each}}
