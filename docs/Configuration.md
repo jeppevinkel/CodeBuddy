@@ -1,147 +1,232 @@
-# Configuration Validation System
+# Configuration Management System
 
-The CodeBuddy configuration system provides robust validation and versioning capabilities to ensure reliable configuration management across different environments and versions.
+The CodeBuddy Configuration Management System provides a robust and flexible way to manage application settings across different environments, with support for validation, versioning, and secure storage.
 
-## Configuration Schema Versioning
+## Configuration File Format
 
-Configurations are versioned using the `SchemaVersionAttribute`:
+Configuration files are stored as JSON in the `config` directory. Each configuration section has its own file named `{section}.json`.
 
-```csharp
-[SchemaVersion("2.0")]
-public class ValidationConfiguration : BaseConfiguration
+### Basic Structure
+
+```json
 {
-    // Configuration properties
+  "version": "1.0",
+  "settings": {
+    // Section-specific settings here
+  }
 }
 ```
 
-## Validation Rules
+### Schema Versioning
 
-### Built-in Validation Attributes
+All configuration files include a version field to track schema changes and enable automatic migrations:
 
-- `Required` - Marks a property as required
-- `Range` - Specifies numeric range constraints
-- `MinLength` - Specifies minimum length for collections
-- `EnvironmentSpecific` - Restricts values to specific environments
-- `SensitiveData` - Marks properties containing sensitive data
-- `Reloadable` - Indicates properties that can be modified at runtime
-- `RequiresBackup` - Requires backup before modification
-- `ValidEnumValues` - Validates enum values
+```json
+{
+  "version": "1.0",
+  "settings": {
+    // Settings for version 1.0
+  }
+}
+```
+
+When the schema changes, the version is incremented (e.g., to "2.0") and the ConfigurationMigrationManager handles automatic updates.
+
+## Configuration Sources
+
+The system supports multiple configuration sources in order of precedence:
+
+1. Command Line Arguments (highest priority)
+2. Environment Variables
+3. Configuration Files
+4. Default Values (lowest priority)
+
+### Environment Variables
+
+Environment variables can override file-based configuration using the following format:
+```
+CONFIG_{SECTION}_{KEY}=value
+```
 
 Example:
+```bash
+# Override logging level in the Logging section
+CONFIG_LOGGING_LEVEL=Debug
+```
+
+### Secure Configuration
+
+Sensitive values (passwords, API keys, etc.) are stored securely using the SecureConfigurationStorage:
+
 ```csharp
-public class ValidationConfiguration : BaseConfiguration
+// Store secure value
+await configManager.SetSecureValue("database", "password", "secret123");
+
+// Retrieve secure value
+string password = await configManager.GetSecureValue("database", "password");
+```
+
+## Configuration Sections
+
+### Logging Configuration
+
+```json
+{
+  "version": "1.0",
+  "settings": {
+    "level": "Information",
+    "outputTemplate": "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}",
+    "filePath": "logs/codebuddy.log",
+    "rollingInterval": "Day",
+    "retainedFileCountLimit": 31
+  }
+}
+```
+
+### Validation Configuration
+
+```json
+{
+  "version": "1.0",
+  "settings": {
+    "parallelValidation": true,
+    "maxConcurrentValidations": 4,
+    "cacheValidationResults": true,
+    "cacheDuration": "00:30:00",
+    "rules": {
+      "enabled": true,
+      "customRulesPath": "rules"
+    }
+  }
+}
+```
+
+### Plugin Configuration
+
+```json
+{
+  "version": "1.0",
+  "settings": {
+    "pluginDirectory": "plugins",
+    "autoLoadPlugins": true,
+    "enableHotReload": true,
+    "isolation": {
+      "enabled": true,
+      "maxMemoryMB": 512,
+      "timeoutSeconds": 30
+    }
+  }
+}
+```
+
+## Command Line Interface
+
+The `codebuddy config` command provides CLI access to configuration management:
+
+```bash
+# Get configuration value
+codebuddy config get --key logging.level
+
+# Set configuration value
+codebuddy config set --key logging.level --value Debug
+
+# List all configuration
+codebuddy config list
+
+# Reset to defaults
+codebuddy config reset
+```
+
+## Configuration Validation
+
+Configuration values are validated using data annotations and custom validation rules:
+
+```csharp
+public class LoggingConfiguration
 {
     [Required]
-    [Range(1, 10)]
-    public int MaxConcurrentValidations { get; set; }
+    public string Level { get; set; }
 
-    [EnvironmentSpecific("Development", "Staging", "Production")]
-    public Dictionary<string, int> ResourceLimits { get; set; }
+    [Required]
+    [RegularExpression(@"^logs/.*\.log$")]
+    public string FilePath { get; set; }
 
-    [SensitiveData]
-    public string? ValidationApiKey { get; set; }
+    [Range(1, 365)]
+    public int RetainedFileCountLimit { get; set; }
 }
 ```
 
 ## Configuration Migration
 
-### Version Migration
+When configuration schemas change, migrations are automatically handled:
 
-When configuration schema changes, create a migration class:
+1. The system detects a version mismatch
+2. ConfigurationMigrationManager loads the appropriate migration
+3. Configuration is upgraded to the new schema
+4. New configuration is validated before being applied
 
+Example migration:
 ```csharp
-public class ValidationConfigV1ToV2Migration : IConfigurationMigration
+public class ConfigMigration_1_0_to_2_0 : IConfigurationMigration
 {
     public string FromVersion => "1.0";
     public string ToVersion => "2.0";
 
-    public object Migrate(object configuration)
+    public async Task<T> Migrate<T>(T config) where T : class
     {
-        var v1Config = (ValidationConfiguration)configuration;
-        // Perform migration logic
-        return v1Config;
-    }
-
-    public ValidationResult Validate(object configuration)
-    {
-        // Validate configuration before migration
-        return ValidationResult.Success();
+        // Migration logic here
+        return upgradedConfig;
     }
 }
 ```
 
-Register the migration:
-```csharp
-var migrationManager = new ConfigurationMigrationManager();
-migrationManager.RegisterMigration<ValidationConfiguration>(new ValidationConfigV1ToV2Migration());
+## Environment-Specific Configuration
+
+Different environments (development, staging, production) can have their own configuration overrides:
+
+```bash
+# Set environment
+export ENVIRONMENT=production
+
+# Get production-specific configuration
+await configManager.GetConfiguration<LoggingConfiguration>("logging", "production");
 ```
 
-### Backup and Rollback
+## Change Notifications
 
-Configurations are automatically backed up before migrations:
-- Backups stored in `config/backups` directory
-- Naming format: `{ConfigName}_v{Version}_{Timestamp}.json`
-- Automatic rollback on migration failure
+Register for configuration changes:
 
-## Configuration Health Checks
-
-The `SystemHealthDashboard` monitors configuration health:
-- Schema version validation
-- Configuration integrity checks
-- Migration history tracking
-- Environment-specific validation
-- Resource limit monitoring
-
-## Plugin Developer Guidelines
-
-### Creating Plugin Configurations
-
-1. Inherit from `BaseConfiguration`
-2. Use schema versioning
-3. Apply validation attributes
-4. Implement custom validation logic
-
-Example:
 ```csharp
-[SchemaVersion("1.0")]
-public class PluginConfiguration : BaseConfiguration
+configManager.RegisterChangeCallback<LoggingConfiguration>("logging", config =>
 {
-    [Required]
-    public string PluginName { get; set; }
-
-    [EnvironmentSpecific("Development", "Production")]
-    public Dictionary<string, string> Settings { get; set; }
-
-    public override ValidationResult? Validate()
-    {
-        var baseResult = base.Validate();
-        if (baseResult?.ValidationResult != ValidationResult.Success)
-        {
-            return baseResult;
-        }
-
-        // Custom validation logic
-        return ValidationResult.Success;
-    }
-}
+    // Handle configuration change
+    UpdateLoggingSettings(config);
+});
 ```
-
-### Configuration Migration
-
-1. Create migration class implementing `IConfigurationMigration`
-2. Register migration with `ConfigurationMigrationManager`
-3. Test migration paths
-4. Document breaking changes
 
 ## Best Practices
 
-1. Always version configurations
-2. Use appropriate validation attributes
-3. Implement custom validation when needed
-4. Create migrations for breaking changes
-5. Test configurations across environments
-6. Document configuration requirements
-7. Monitor configuration health
-8. Backup sensitive configurations
-9. Use environment-specific validation
-10. Handle migration failures gracefully
+1. **Security**:
+   - Never commit sensitive values to source control
+   - Use SecureConfigurationStorage for sensitive data
+   - Restrict access to configuration files
+
+2. **Validation**:
+   - Always validate configuration at startup
+   - Use data annotations for basic validation
+   - Implement custom validation for complex rules
+
+3. **Versioning**:
+   - Always include version in configuration files
+   - Implement migrations for schema changes
+   - Test migrations thoroughly
+
+4. **Documentation**:
+   - Document all configuration options
+   - Include examples for common scenarios
+   - Keep documentation updated with schema changes
+
+5. **Testing**:
+   - Write tests for configuration validation
+   - Test configuration migrations
+   - Verify environment variable overrides

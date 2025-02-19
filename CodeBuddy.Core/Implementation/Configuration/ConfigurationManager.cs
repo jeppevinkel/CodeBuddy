@@ -22,12 +22,14 @@ namespace CodeBuddy.Core.Implementation.Configuration
         private readonly string _configBasePath;
         private readonly Dictionary<string, object> _configCache;
         private readonly Dictionary<string, List<Delegate>> _changeCallbacks;
+        private readonly Dictionary<string, string> _commandLineArgs;
 
         public ConfigurationManager(
             IConfigurationMigrationManager migrationManager,
             IConfigurationValidator validator,
             SecureConfigurationStorage secureStorage,
             ConfigurationDocumentationGenerator documentationGenerator,
+            IEnumerable<string> commandLineArgs = null,
             string configBasePath = "config")
         {
             _migrationManager = migrationManager ?? throw new ArgumentNullException(nameof(migrationManager));
@@ -37,6 +39,24 @@ namespace CodeBuddy.Core.Implementation.Configuration
             _configBasePath = configBasePath;
             _configCache = new Dictionary<string, object>();
             _changeCallbacks = new Dictionary<string, List<Delegate>>();
+            _commandLineArgs = ParseCommandLineArgs(commandLineArgs ?? Array.Empty<string>());
+        }
+
+        private Dictionary<string, string> ParseCommandLineArgs(IEnumerable<string> args)
+        {
+            var result = new Dictionary<string, string>();
+            foreach (var arg in args)
+            {
+                if (arg.StartsWith("--"))
+                {
+                    var parts = arg[2..].Split('=', 2);
+                    if (parts.Length == 2)
+                    {
+                        result[parts[0].Replace('-', '.')] = parts[1];
+                    }
+                }
+            }
+            return result;
         }
 
         public async Task<T> GetConfiguration<T>(string section) where T : class, new()
@@ -219,10 +239,24 @@ namespace CodeBuddy.Core.Implementation.Configuration
             var configText = await File.ReadAllTextAsync(configPath);
             var config = JsonSerializer.Deserialize<T>(configText);
 
-            // Apply environment variables override
+            // Apply overrides in order of precedence
             ApplyEnvironmentOverrides(config);
+            ApplyCommandLineOverrides(config, section);
 
             return config ?? new T();
+        }
+
+        private void ApplyCommandLineOverrides<T>(T config, string section) where T : class
+        {
+            foreach (var prop in typeof(T).GetProperties())
+            {
+                var key = $"{section}.{prop.Name.ToLowerInvariant()}";
+                if (_commandLineArgs.TryGetValue(key, out var value))
+                {
+                    var convertedValue = Convert.ChangeType(value, prop.PropertyType);
+                    prop.SetValue(config, convertedValue);
+                }
+            }
         }
 
         private void ApplyEnvironmentOverrides<T>(T config) where T : class

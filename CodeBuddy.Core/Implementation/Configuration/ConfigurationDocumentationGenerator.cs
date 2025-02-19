@@ -1,221 +1,172 @@
 using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.ComponentModel.DataAnnotations;
+using System.IO;
 using System.Linq;
-using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
+using System.ComponentModel.DataAnnotations;
+using System.Reflection;
 using CodeBuddy.Core.Models.Configuration;
 
 namespace CodeBuddy.Core.Implementation.Configuration
 {
-    /// <summary>
-    /// Generates documentation for configuration classes and their settings
-    /// </summary>
     public class ConfigurationDocumentationGenerator
     {
-        private readonly IConfigurationManager _configManager;
+        private readonly string _configBasePath;
 
-        public ConfigurationDocumentationGenerator(IConfigurationManager configManager)
+        public ConfigurationDocumentationGenerator(string configBasePath)
         {
-            _configManager = configManager;
+            _configBasePath = configBasePath;
         }
 
-        /// <summary>
-        /// Generates markdown documentation for all configuration sections
-        /// </summary>
         public async Task<string> GenerateDocumentation(string configBasePath)
         {
             var sb = new StringBuilder();
-            
-            sb.AppendLine("# Configuration Documentation");
+            sb.AppendLine("# Configuration Reference");
             sb.AppendLine();
-            sb.AppendLine("This document describes all available configuration settings and their usage.");
+            sb.AppendLine("This document describes all available configuration options for CodeBuddy.");
             sb.AppendLine();
 
-            // Get all configuration types from the assembly
+            // Get all configuration classes from the assembly
             var configTypes = Assembly.GetExecutingAssembly()
                 .GetTypes()
-                .Where(t => typeof(BaseConfiguration).IsAssignableFrom(t) && !t.IsAbstract)
+                .Where(t => t.Namespace?.Contains("Configuration") == true && 
+                           t.GetCustomAttribute<SchemaVersionAttribute>() != null)
                 .OrderBy(t => t.Name);
 
-            foreach (var configType in configTypes)
+            foreach (var type in configTypes)
             {
-                await DocumentConfigurationType(configType, sb);
+                DocumentConfigurationType(type, sb);
             }
-
-            sb.AppendLine("## Environment Variables");
-            sb.AppendLine();
-            sb.AppendLine("Configuration values can be overridden using environment variables following this pattern:");
-            sb.AppendLine("`CONFIG_[SectionName]_[PropertyName]`");
-            sb.AppendLine();
-            sb.AppendLine("Example: `CONFIG_LOGGING_LOGLEVEL=Debug`");
-            sb.AppendLine();
-
-            sb.AppendLine("## Secure Configuration");
-            sb.AppendLine();
-            sb.AppendLine("Properties marked with `[SensitiveData]` are automatically encrypted when stored.");
-            sb.AppendLine("These values should be set using the secure configuration commands:");
-            sb.AppendLine();
-            sb.AppendLine("```bash");
-            sb.AppendLine("codebuddy config set-secure [section] [key] [value]");
-            sb.AppendLine("```");
 
             return sb.ToString();
         }
 
-        private async Task DocumentConfigurationType(Type configType, StringBuilder sb)
+        private void DocumentConfigurationType(Type type, StringBuilder sb)
         {
-            var sectionName = configType.Name.Replace("Configuration", "");
+            var schemaVersion = type.GetCustomAttribute<SchemaVersionAttribute>();
             
-            sb.AppendLine($"## {sectionName} Configuration");
+            sb.AppendLine($"## {FormatTypeName(type.Name)}");
+            sb.AppendLine();
+            
+            // Add version info
+            sb.AppendLine($"**Schema Version:** {schemaVersion?.Version ?? "1.0"}");
             sb.AppendLine();
 
-            // Add type description
-            var typeDescription = configType.GetCustomAttribute<DescriptionAttribute>()?.Description;
-            if (!string.IsNullOrEmpty(typeDescription))
-            {
-                sb.AppendLine(typeDescription);
-                sb.AppendLine();
-            }
+            // Document file location
+            var sectionName = type.Name.Replace("Configuration", "").ToLowerInvariant();
+            sb.AppendLine($"**File:** `{_configBasePath}/{sectionName}.json`");
+            sb.AppendLine();
 
-            // Get current configuration if it exists
-            var metadata = await _configManager.GetConfigurationMetadata(sectionName);
-            if (metadata != null)
-            {
-                sb.AppendLine("### Metadata");
-                sb.AppendLine();
-                sb.AppendLine("| Property | Value |");
-                sb.AppendLine("|----------|--------|");
-                foreach (var kvp in metadata)
-                {
-                    sb.AppendLine($"| {kvp.Key} | {kvp.Value} |");
-                }
-                sb.AppendLine();
-            }
-
+            // Document properties
             sb.AppendLine("### Properties");
             sb.AppendLine();
-            sb.AppendLine("| Property | Type | Default | Description | Validation |");
-            sb.AppendLine("|----------|------|---------|-------------|------------|");
+            sb.AppendLine("| Property | Type | Required | Default | Description |");
+            sb.AppendLine("|----------|------|----------|---------|-------------|");
 
-            var properties = configType.GetProperties()
-                .Where(p => p.GetCustomAttribute<BrowsableAttribute>()?.Browsable != false)
-                .OrderBy(p => p.Name);
-
-            foreach (var property in properties)
+            foreach (var prop in type.GetProperties())
             {
-                var defaultValue = GetDefaultValue(property);
-                var description = property.GetCustomAttribute<DescriptionAttribute>()?.Description ?? "";
-                var validation = GetValidationRules(property);
-
-                sb.AppendLine($"| {property.Name} | {GetTypeDescription(property.PropertyType)} | {defaultValue} | {description} | {validation} |");
+                DocumentProperty(prop, sb);
             }
+
             sb.AppendLine();
 
-            // Document any nested configuration classes
-            var nestedTypes = configType.GetProperties()
-                .Where(p => p.PropertyType.IsClass && p.PropertyType != typeof(string))
-                .Select(p => p.PropertyType)
-                .Distinct();
-
-            foreach (var nestedType in nestedTypes)
-            {
-                sb.AppendLine($"### {nestedType.Name}");
-                sb.AppendLine();
-                await DocumentConfigurationType(nestedType, sb);
-            }
+            // Add example
+            sb.AppendLine("### Example");
+            sb.AppendLine();
+            sb.AppendLine("```json");
+            sb.AppendLine(GenerateExample(type));
+            sb.AppendLine("```");
+            sb.AppendLine();
         }
 
-        private string GetTypeDescription(Type type)
+        private void DocumentProperty(PropertyInfo prop, StringBuilder sb)
         {
-            if (type.IsEnum)
+            var required = prop.GetCustomAttribute<RequiredAttribute>() != null;
+            var envVar = prop.GetCustomAttribute<EnvironmentVariableAttribute>();
+            var secure = prop.GetCustomAttribute<SecureStorageAttribute>() != null;
+            var range = prop.GetCustomAttribute<RangeAttribute>();
+            
+            var description = new StringBuilder();
+            
+            if (secure)
             {
-                var values = string.Join(", ", Enum.GetNames(type));
-                return $"Enum ({values})";
+                description.Append("*(Secure)* ");
+            }
+            
+            if (envVar != null)
+            {
+                description.Append($"Environment Variable: `{envVar.VariableName}`. ");
+            }
+            
+            if (range != null)
+            {
+                description.Append($"Range: {range.Minimum} to {range.Maximum}. ");
             }
 
-            if (type == typeof(string)) return "string";
-            if (type == typeof(int)) return "int";
-            if (type == typeof(bool)) return "boolean";
-            if (type == typeof(DateTime)) return "datetime";
-            if (type == typeof(TimeSpan)) return "timespan";
-            if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(List<>))
-            {
-                return $"list of {GetTypeDescription(type.GetGenericArguments()[0])}";
-            }
-
-            return type.Name;
+            sb.AppendLine($"| {prop.Name} | {FormatTypeName(prop.PropertyType.Name)} | {(required ? "Yes" : "No")} | {GetDefaultValue(prop)} | {description} |");
         }
 
-        private string GetDefaultValue(PropertyInfo property)
+        private string FormatTypeName(string typeName)
         {
-            var defaultAttr = property.GetCustomAttribute<DefaultValueAttribute>();
-            if (defaultAttr != null)
+            return typeName
+                .Replace("Configuration", "")
+                .Replace("String", "string")
+                .Replace("Int32", "int")
+                .Replace("Boolean", "bool");
+        }
+
+        private string GetDefaultValue(PropertyInfo prop)
+        {
+            var defaultValue = prop.PropertyType.IsValueType ? 
+                Activator.CreateInstance(prop.PropertyType) : 
+                null;
+                
+            return defaultValue?.ToString() ?? "-";
+        }
+
+        private string GenerateExample(Type type)
+        {
+            var example = new StringBuilder();
+            example.AppendLine("{");
+            
+            var schemaVersion = type.GetCustomAttribute<SchemaVersionAttribute>();
+            example.AppendLine($"  \"version\": \"{schemaVersion?.Version ?? "1.0"}\",");
+            example.AppendLine("  \"settings\": {");
+
+            var props = type.GetProperties();
+            for (var i = 0; i < props.Length; i++)
             {
-                return defaultAttr.Value?.ToString() ?? "null";
+                var prop = props[i];
+                var value = GetExampleValue(prop);
+                example.AppendLine($"    \"{prop.Name}\": {value}{(i < props.Length - 1 ? "," : "")}");
             }
 
-            if (property.PropertyType.IsValueType)
-            {
-                return Activator.CreateInstance(property.PropertyType)?.ToString() ?? "0";
-            }
+            example.AppendLine("  }");
+            example.AppendLine("}");
 
+            return example.ToString();
+        }
+
+        private string GetExampleValue(PropertyInfo prop)
+        {
+            if (prop.PropertyType == typeof(string))
+            {
+                return "\"example\"";
+            }
+            if (prop.PropertyType == typeof(bool))
+            {
+                return "true";
+            }
+            if (prop.PropertyType == typeof(int))
+            {
+                return "42";
+            }
+            if (prop.PropertyType.IsEnum)
+            {
+                var enumValue = Enum.GetValues(prop.PropertyType).GetValue(0);
+                return $"\"{enumValue}\"";
+            }
             return "null";
-        }
-
-        private string GetValidationRules(PropertyInfo property)
-        {
-            var rules = new List<string>();
-
-            // Required validation
-            if (property.GetCustomAttribute<RequiredAttribute>() != null)
-            {
-                rules.Add("Required");
-            }
-
-            // Range validation
-            var rangeAttr = property.GetCustomAttribute<RangeAttribute>();
-            if (rangeAttr != null)
-            {
-                rules.Add($"Range: {rangeAttr.Minimum} to {rangeAttr.Maximum}");
-            }
-
-            // String length
-            var stringLengthAttr = property.GetCustomAttribute<StringLengthAttribute>();
-            if (stringLengthAttr != null)
-            {
-                rules.Add($"Length: {stringLengthAttr.MinimumLength} to {stringLengthAttr.MaximumLength}");
-            }
-
-            // RegularExpression
-            var regexAttr = property.GetCustomAttribute<RegularExpressionAttribute>();
-            if (regexAttr != null)
-            {
-                rules.Add($"Pattern: {regexAttr.Pattern}");
-            }
-
-            // Environment specific
-            var envAttr = property.GetCustomAttribute<EnvironmentSpecificAttribute>();
-            if (envAttr != null)
-            {
-                rules.Add($"Environments: {string.Join(", ", envAttr.Environments)}");
-            }
-
-            // Sensitive data
-            if (property.GetCustomAttribute<SensitiveDataAttribute>() != null)
-            {
-                rules.Add("Sensitive");
-            }
-
-            // Reloadable
-            if (property.GetCustomAttribute<ReloadableAttribute>() != null)
-            {
-                rules.Add("Reloadable");
-            }
-
-            return string.Join("; ", rules);
         }
     }
 }
