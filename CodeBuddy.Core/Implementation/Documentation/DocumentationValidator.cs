@@ -16,6 +16,7 @@ namespace CodeBuddy.Core.Implementation.Documentation
         private readonly XmlDocumentationParser _xmlParser;
         private readonly CodeExampleValidator _exampleValidator;
         private readonly CrossReferenceGenerator _crossRefGenerator;
+        private readonly XmlDocumentationAnalyzer _xmlAnalyzer;
 
         public DocumentationValidator(
             XmlDocumentationParser xmlParser,
@@ -25,6 +26,7 @@ namespace CodeBuddy.Core.Implementation.Documentation
             _xmlParser = xmlParser;
             _exampleValidator = exampleValidator;
             _crossRefGenerator = crossRefGenerator;
+            _xmlAnalyzer = new XmlDocumentationAnalyzer(xmlParser, this);
         }
 
         /// <summary>
@@ -37,8 +39,17 @@ namespace CodeBuddy.Core.Implementation.Documentation
                 Issues = new List<DocumentationIssue>()
             };
 
-            // Validate API documentation coverage
-            await ValidateApiDocumentationCoverage(documentation, result);
+            // Analyze XML documentation in assemblies
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies()
+                .Where(a => a.FullName.StartsWith("CodeBuddy")))
+            {
+                var analysisResult = await _xmlAnalyzer.AnalyzeAssemblyAsync(assembly);
+                result.Issues.AddRange(analysisResult.Issues);
+                
+                // Add analysis results to documentation
+                documentation.AnalysisResults ??= new List<DocumentationAnalysisResult>();
+                documentation.AnalysisResults.Add(analysisResult);
+            }
 
             // Validate code examples
             await ValidateCodeExamples(documentation, result);
@@ -54,53 +65,28 @@ namespace CodeBuddy.Core.Implementation.Documentation
 
             // Calculate overall documentation quality score
             result.QualityScore = CalculateQualityScore(result.Issues);
+            result.Coverage = CalculateOverallCoverage(documentation.AnalysisResults);
 
             return result;
         }
 
-        private async Task ValidateApiDocumentationCoverage(DocumentationSet docs, ValidationResult result)
+        /// <summary>
+        /// Gets documentation analysis results for a specific assembly
+        /// </summary>
+        public async Task<DocumentationAnalysisResult> AnalyzeAssemblyAsync(Assembly assembly)
         {
-            foreach (var type in docs.Types)
-            {
-                // Check type documentation
-                if (string.IsNullOrWhiteSpace(type.Description))
-                {
-                    result.Issues.Add(new DocumentationIssue
-                    {
-                        Type = IssueType.MissingDescription,
-                        Component = $"Type: {type.Name}",
-                        Message = "Type is missing description"
-                    });
-                }
+            return await _xmlAnalyzer.AnalyzeAssemblyAsync(assembly);
+        }
 
-                // Check method documentation
-                foreach (var method in type.Methods)
-                {
-                    if (string.IsNullOrWhiteSpace(method.Description))
-                    {
-                        result.Issues.Add(new DocumentationIssue
-                        {
-                            Type = IssueType.MissingDescription,
-                            Component = $"Method: {type.Name}.{method.Name}",
-                            Message = "Method is missing description"
-                        });
-                    }
+        /// <summary>
+        /// Calculates the overall documentation coverage across all analyzed assemblies
+        /// </summary>
+        private double CalculateOverallCoverage(List<DocumentationAnalysisResult> analysisResults)
+        {
+            if (analysisResults == null || !analysisResults.Any())
+                return 0.0;
 
-                    // Check parameter documentation
-                    foreach (var param in method.Parameters)
-                    {
-                        if (string.IsNullOrWhiteSpace(param.Description))
-                        {
-                            result.Issues.Add(new DocumentationIssue
-                            {
-                                Type = IssueType.MissingParameterDescription,
-                                Component = $"Parameter: {type.Name}.{method.Name}({param.Name})",
-                                Message = "Parameter is missing description"
-                            });
-                        }
-                    }
-                }
-            }
+            return analysisResults.Average(r => r.Coverage);
         }
 
         private async Task ValidateCodeExamples(DocumentationSet docs, ValidationResult result)

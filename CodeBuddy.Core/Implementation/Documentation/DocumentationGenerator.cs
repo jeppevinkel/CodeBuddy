@@ -243,9 +243,33 @@ namespace CodeBuddy.Core.Implementation.Documentation
         {
             var result = new DocumentationValidationResult();
             
-            // Analyze XML documentation coverage
-            var coverageResult = await AnalyzeDocumentationCoverageAsync();
-            result.Coverage = coverageResult.Coverage;
+            // Create XML documentation analyzer if needed
+            var xmlParser = new XmlDocumentationParser();
+            var docValidator = new DocumentationValidator(xmlParser, _exampleValidator, _crossRefGenerator);
+            var xmlAnalyzer = new XmlDocumentationAnalyzer(xmlParser, docValidator);
+
+            // Analyze XML documentation in all assemblies
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies()
+                .Where(a => a.FullName.StartsWith("CodeBuddy")))
+            {
+                var analysisResult = await xmlAnalyzer.AnalyzeAssemblyAsync(assembly);
+                
+                // Add analysis results
+                result.AnalysisResults ??= new List<DocumentationAnalysisResult>();
+                result.AnalysisResults.Add(analysisResult);
+
+                // Add issues
+                foreach (var issue in analysisResult.Issues)
+                {
+                    result.Issues.Add(new DocumentationIssue
+                    {
+                        Component = issue.Component,
+                        IssueType = issue.Type.ToString(),
+                        Description = issue.Message,
+                        Severity = (IssueSeverity)issue.Severity
+                    });
+                }
+            }
 
             // Validate code examples
             var examples = await ExtractCodeExamplesAsync();
@@ -277,11 +301,63 @@ namespace CodeBuddy.Core.Implementation.Documentation
                 });
             }
 
-            // Add recommendations
-            result.Recommendations.AddRange(_docAnalyzer.GenerateRecommendations(result.Issues));
+            // Calculate overall documentation quality and coverage
+            result.Coverage = result.AnalysisResults?.Average(r => r.Coverage) ?? 0.0;
+            result.QualityScore = result.AnalysisResults?.Average(r => r.QualityScore) ?? 0.0;
+
+            // Generate recommendations
+            result.Recommendations = GenerateRecommendations(result);
 
             result.IsValid = !result.Issues.Any(i => i.Severity == IssueSeverity.Error);
             return result;
+        }
+
+        private List<string> GenerateRecommendations(DocumentationValidationResult result)
+        {
+            var recommendations = new List<string>();
+
+            if (result.Coverage < 0.8)
+            {
+                recommendations.Add($"Improve documentation coverage (currently at {result.Coverage:P0}) by adding XML comments to undocumented public APIs");
+            }
+
+            var missingParamDocs = result.Issues.Count(i => i.IssueType == "MissingParameterDescription");
+            if (missingParamDocs > 0)
+            {
+                recommendations.Add($"Add descriptions for {missingParamDocs} parameters that are missing documentation");
+            }
+
+            var missingReturnDocs = result.Issues.Count(i => i.IssueType == "MissingReturnDescription");
+            if (missingReturnDocs > 0)
+            {
+                recommendations.Add($"Document return values for {missingReturnDocs} methods");
+            }
+
+            var missingExceptionDocs = result.Issues.Count(i => i.IssueType == "MissingExceptionDescription");
+            if (missingExceptionDocs > 0)
+            {
+                recommendations.Add($"Document exceptions for {missingExceptionDocs} methods that can throw");
+            }
+
+            var brokenRefs = result.Issues.Count(i => i.IssueType == "BrokenReference");
+            if (brokenRefs > 0)
+            {
+                recommendations.Add($"Fix {brokenRefs} broken cross-references in documentation");
+            }
+
+            var lowQualityDocs = result.Issues.Count(i => i.IssueType == "LowQualityDescription");
+            if (lowQualityDocs > 0)
+            {
+                recommendations.Add($"Improve {lowQualityDocs} documentation entries that are too short or low quality");
+            }
+
+            var placeholderDocs = result.Issues.Count(i => i.IssueType == "PlaceholderDocumentation");
+            if (placeholderDocs > 0)
+            {
+                recommendations.Add($"Replace {placeholderDocs} placeholder documentation entries with proper descriptions");
+            }
+
+            return recommendations;
         }
 
         public async Task<CrossReferenceResult> GenerateCrossReferencesAsync()
