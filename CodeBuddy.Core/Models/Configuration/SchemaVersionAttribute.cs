@@ -1,28 +1,34 @@
 using System;
-using System.Text.RegularExpressions;
 
 namespace CodeBuddy.Core.Models.Configuration
 {
+    /// <summary>
+    /// Specifies the schema version for a configuration class
+    /// </summary>
     [AttributeUsage(AttributeTargets.Class, Inherited = false, AllowMultiple = false)]
     public class SchemaVersionAttribute : Attribute
     {
-        private static readonly Regex SemVerPattern = new Regex(
-            @"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$",
-            RegexOptions.Compiled);
+        public Version Version { get; }
 
-        public string Version { get; }
-        public string Description { get; }
-
-        public SchemaVersionAttribute(string version, string description = "")
+        public SchemaVersionAttribute(string version)
         {
-            if (string.IsNullOrWhiteSpace(version))
-                throw new ArgumentException("Version cannot be null or empty", nameof(version));
+            Version = Version.Parse(version);
+        }
+    }
 
-            if (!SemVerPattern.IsMatch(version))
-                throw new ArgumentException("Version must follow semantic versioning format (e.g. 1.0.0)", nameof(version));
+    /// <summary>
+    /// Marks a class as a configuration section
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Class, Inherited = false, AllowMultiple = false)]
+    public class ConfigurationSectionAttribute : Attribute
+    {
+        public string Name { get; }
+        public Version Version { get; }
 
-            Version = version;
-            Description = description;
+        public ConfigurationSectionAttribute(string name, string version = "1.0")
+        {
+            Name = name;
+            Version = Version.Parse(version);
         }
     }
 }

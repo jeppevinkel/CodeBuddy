@@ -1,7 +1,8 @@
 using System;
-using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.ComponentModel.DataAnnotations;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodeBuddy.Core.Interfaces;
@@ -20,7 +21,7 @@ public class ConfigurationManager : IConfigurationManager
     private readonly IFileOperations _fileOperations;
     private readonly ILogger<ConfigurationManager> _logger;
     private readonly string _configPath;
-    private readonly Dictionary<string, object> _cache = new();
+    private readonly ConcurrentDictionary<string, object> _cache = new();
     private readonly JsonSerializerOptions _jsonOptions;
     private readonly System.Threading.Timer _healthCheckTimer;
     private readonly IConfigurationMigrationManager _migrationManager;
@@ -331,39 +332,64 @@ public class ConfigurationManager : IConfigurationManager
     public async Task<string> GenerateConfigurationDocumentation()
     {
         var documentation = new StringBuilder();
-        documentation.AppendLine("# Configuration Documentation");
+        documentation.AppendLine("# CodeBuddy Configuration Documentation");
+        documentation.AppendLine();
+        documentation.AppendLine("This document describes all available configuration settings for CodeBuddy, including validation rules and special attributes.");
         documentation.AppendLine();
 
-        foreach (var (section, config) in _cache)
+        // Global Configuration Info
+        documentation.AppendLine("## Global Information");
+        documentation.AppendLine();
+        documentation.AppendLine($"- Configuration File: `{_configPath}`");
+        documentation.AppendLine($"- Current Environment: `{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}`");
+        documentation.AppendLine();
+
+        // Document each configuration section
+        var sections = new List<(string Section, Type Type, object Instance)>();
+        
+        foreach (var (section, instance) in _cache)
+        {
+            sections.Add((section, instance.GetType(), instance));
+        }
+
+        sections = sections.OrderBy(s => s.Section).ToList();
+
+        foreach (var (section, type, instance) in sections)
         {
             documentation.AppendLine($"## {section}");
-            documentation.AppendLine($"Schema Version: {GetConfigurationVersion(section)}");
+            documentation.AppendLine();
+            
+            var metadata = await GetConfigurationMetadata(section);
+            documentation.AppendLine("### Metadata");
+            documentation.AppendLine();
+            foreach (var (key, value) in metadata)
+            {
+                documentation.AppendLine($"- **{key}:** {value}");
+            }
             documentation.AppendLine();
 
-            var type = config.GetType();
-            foreach (var prop in type.GetProperties())
-            {
-                documentation.AppendLine($"### {prop.Name}");
-                
-                var description = prop.GetCustomAttribute<DescriptionAttribute>()?.Description;
-                if (!string.IsNullOrEmpty(description))
-                {
-                    documentation.AppendLine(description);
-                }
-
-                var validationAttributes = prop.GetCustomAttributes().OfType<ValidationAttribute>();
-                if (validationAttributes.Any())
-                {
-                    documentation.AppendLine("\nValidation:");
-                    foreach (var attr in validationAttributes)
-                    {
-                        documentation.AppendLine($"- {attr.GetType().Name}: {attr.ErrorMessage}");
-                    }
-                }
-
-                documentation.AppendLine();
-            }
+            documentation.Append(ConfigurationDocumentationGenerator.GenerateDocumentation(type));
+            documentation.AppendLine();
         }
+
+        // Environment Variables
+        documentation.AppendLine("## Environment Variables");
+        documentation.AppendLine();
+        documentation.AppendLine("The following environment variables affect configuration behavior:");
+        documentation.AppendLine();
+        documentation.AppendLine("- `ASPNETCORE_ENVIRONMENT`: Determines which environment-specific configuration file to load");
+        documentation.AppendLine("- `CODEBUDDY_CONFIG_PATH`: Override default configuration file path");
+        documentation.AppendLine("- `CODEBUDDY_SECURE_STORAGE`: Path to secure configuration storage");
+        documentation.AppendLine();
+
+        // Command Line Arguments
+        documentation.AppendLine("## Command Line Arguments");
+        documentation.AppendLine();
+        documentation.AppendLine("Configuration can be overridden via command line arguments. Example:");
+        documentation.AppendLine();
+        documentation.AppendLine("```bash");
+        documentation.AppendLine("codebuddy --logging:level Debug --validation:timeout 30");
+        documentation.AppendLine("```");
 
         return documentation.ToString();
     }
