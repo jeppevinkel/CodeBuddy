@@ -18,6 +18,7 @@ namespace CodeBuddy.Core.Implementation.Configuration
         private readonly IPluginManager _pluginManager;
         private readonly ILoggingService _logger;
         private readonly SystemHealthDashboard _systemHealthDashboard;
+        private readonly IResourceMonitor _resourceMonitor;
 
         public ConfigurationValidationDashboard(
             IConfigurationManager configManager,
@@ -25,7 +26,8 @@ namespace CodeBuddy.Core.Implementation.Configuration
             IConfigurationMigrationManager migrationManager,
             IPluginManager pluginManager,
             ILoggingService logger,
-            SystemHealthDashboard systemHealthDashboard)
+            SystemHealthDashboard systemHealthDashboard,
+            IResourceMonitor resourceMonitor)
         {
             _configManager = configManager ?? throw new ArgumentNullException(nameof(configManager));
             _configValidator = configValidator ?? throw new ArgumentNullException(nameof(configValidator));
@@ -33,6 +35,7 @@ namespace CodeBuddy.Core.Implementation.Configuration
             _pluginManager = pluginManager ?? throw new ArgumentNullException(nameof(pluginManager));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _systemHealthDashboard = systemHealthDashboard ?? throw new ArgumentNullException(nameof(systemHealthDashboard));
+            _resourceMonitor = resourceMonitor ?? throw new ArgumentNullException(nameof(resourceMonitor));
         }
 
         /// <summary>
@@ -55,9 +58,62 @@ namespace CodeBuddy.Core.Implementation.Configuration
         /// <summary>
         /// Checks for and reports any configuration warnings or issues
         /// </summary>
-        public async Task<List<ConfigurationWarning>> GetConfigurationWarningsAsync()
+        public async Task<List<ConfigurationWarning>> GetConfigurationWarningsAsync(bool includeResourceWarnings = true)
         {
             var warnings = new List<ConfigurationWarning>();
+
+            // Check resource limits if requested
+            if (includeResourceWarnings)
+            {
+                var resourceMetrics = await _resourceMonitor.GetResourceMetricsAsync();
+                
+                // Check memory usage
+                if (resourceMetrics.MemoryUsagePercentage > resourceMetrics.MemoryThresholdPercentage)
+                {
+                    warnings.Add(new ConfigurationWarning
+                    {
+                        Type = WarningType.ResourceLimitViolation,
+                        Message = $"Memory usage ({resourceMetrics.MemoryUsagePercentage}%) exceeds threshold ({resourceMetrics.MemoryThresholdPercentage}%)",
+                        Severity = WarningSeverity.Error
+                    });
+                }
+
+                // Check CPU usage
+                if (resourceMetrics.CpuUsagePercentage > resourceMetrics.CpuThresholdPercentage)
+                {
+                    warnings.Add(new ConfigurationWarning
+                    {
+                        Type = WarningType.ResourceLimitViolation,
+                        Message = $"CPU usage ({resourceMetrics.CpuUsagePercentage}%) exceeds threshold ({resourceMetrics.CpuThresholdPercentage}%)",
+                        Severity = WarningSeverity.Error
+                    });
+                }
+
+                // Check disk space
+                if (resourceMetrics.DiskSpaceRemainingPercentage < resourceMetrics.DiskSpaceThresholdPercentage)
+                {
+                    warnings.Add(new ConfigurationWarning
+                    {
+                        Type = WarningType.ResourceLimitViolation,
+                        Message = $"Available disk space ({resourceMetrics.DiskSpaceRemainingPercentage}%) below threshold ({resourceMetrics.DiskSpaceThresholdPercentage}%)",
+                        Severity = WarningSeverity.Error
+                    });
+                }
+
+                // Check configuration-specific resource limits
+                foreach (var limit in await _resourceMonitor.GetConfigurationResourceLimitsAsync())
+                {
+                    if (limit.CurrentUsage > limit.MaxLimit)
+                    {
+                        warnings.Add(new ConfigurationWarning
+                        {
+                            Type = WarningType.ResourceLimitViolation,
+                            Message = $"Configuration '{limit.ConfigurationName}' exceeds resource limit: {limit.ResourceType} usage ({limit.CurrentUsage}) above maximum ({limit.MaxLimit})",
+                            Severity = WarningSeverity.Error
+                        });
+                    }
+                }
+            }
             
             // Check for deprecated configurations
             var deprecatedConfigs = await _configManager.GetDeprecatedConfigurationsAsync();

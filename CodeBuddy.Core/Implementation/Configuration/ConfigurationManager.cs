@@ -19,13 +19,14 @@ namespace CodeBuddy.Core.Implementation.Configuration
             IConfigurationValidator validator,
             IConfigurationMigrationManager migrationManager,
             ILoggingService logger,
-            SystemHealthDashboard systemHealthDashboard)
+            SystemHealthDashboard systemHealthDashboard,
+            IResourceMonitor resourceMonitor)
         {
             _validator = validator ?? throw new ArgumentNullException(nameof(validator));
             _migrationManager = migrationManager ?? throw new ArgumentNullException(nameof(migrationManager));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _systemHealthDashboard = systemHealthDashboard ?? throw new ArgumentNullException(nameof(systemHealthDashboard));
-            _validationDashboard = new ConfigurationValidationDashboard(this, validator, migrationManager, null, logger, systemHealthDashboard);
+            _validationDashboard = new ConfigurationValidationDashboard(this, validator, migrationManager, null, logger, systemHealthDashboard, resourceMonitor);
             public async Task<List<ConfigurationWarning>> ValidateAndMonitorConfigurationAsync()
         {
             var warnings = await _validationDashboard.GetConfigurationWarningsAsync();
