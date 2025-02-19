@@ -63,7 +63,41 @@ public class MemoryLeakDetector
             {
                 history.Dequeue();
             }
+
+            // Notify ResourceLeakDetectionSystem
+            if (_config.EnableUnifiedLeakDetection)
+            {
+                NotifyResourceSystem(componentId, snapshot);
+            }
         }
+    }
+
+    private void NotifyResourceSystem(string componentId, MemorySnapshot snapshot)
+    {
+        var metrics = new ResourceMetrics
+        {
+            Type = "Memory",
+            ComponentId = componentId,
+            Timestamp = snapshot.Timestamp,
+            AllocationSize = snapshot.Gen0Size + snapshot.Gen1Size + snapshot.Gen2Size + snapshot.LohSize,
+            Gen2Size = snapshot.Gen2Size,
+            LohSize = snapshot.LohSize,
+            FragmentationPercent = snapshot.FragmentationPercent,
+            FinalizationQueueLength = snapshot.FinalizationQueueLength
+        };
+
+        Task.Run(async () =>
+        {
+            try
+            {
+                await _resourceAnalytics.RecordMetricsAsync(metrics);
+            }
+            catch (Exception ex)
+            {
+                // Log error but don't interrupt the main flow
+                _logger?.LogError(ex, "Failed to notify resource system about memory metrics");
+            }
+        });
     }
 
     private MemoryLeakAnalysis AnalyzeMemoryTrends(string componentId)
