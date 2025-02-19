@@ -1,152 +1,151 @@
 using System;
-using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Logging;
 
 namespace CodeBuddy.Core.Implementation.Configuration
 {
-    /// <summary>
-    /// Provides secure storage for sensitive configuration values
-    /// </summary>
     public class SecureConfigurationStorage
     {
-        private readonly ILogger _logger;
-        private readonly string _storagePath;
-        private readonly ConcurrentDictionary<string, string> _cache = new();
-        private readonly byte[] _key;
+        private readonly string _secureStoragePath;
+        private readonly string _keyPath;
+        private Dictionary<string, Dictionary<string, string>> _secureValues;
+        private byte[] _encryptionKey;
 
-        public SecureConfigurationStorage(ILogger logger)
+        public SecureConfigurationStorage(string configBasePath)
         {
-            _logger = logger;
-            _storagePath = Environment.GetEnvironmentVariable("CODEBUDDY_SECURE_STORAGE") 
-                ?? Path.Combine(AppContext.BaseDirectory, "secure_config.json");
-
-            // In production, key should be managed by a key management service
-            _key = DeriveKey("CodeBuddy_DevKey");
-            LoadSecureValues();
+            _secureStoragePath = Path.Combine(configBasePath, "secure-config.dat");
+            _keyPath = Path.Combine(configBasePath, "secure-config.key");
+            _secureValues = new Dictionary<string, Dictionary<string, string>>();
+            InitializeEncryption();
         }
 
-        public async Task<string> GetSecureValue(string key)
+        private void InitializeEncryption()
         {
-            return _cache.TryGetValue(key, out var encryptedValue)
-                ? await DecryptValue(encryptedValue)
-                : string.Empty;
+            if (File.Exists(_keyPath))
+            {
+                _encryptionKey = File.ReadAllBytes(_keyPath);
+            }
+            else
+            {
+                using var aes = Aes.Create();
+                _encryptionKey = aes.Key;
+                Directory.CreateDirectory(Path.GetDirectoryName(_keyPath));
+                File.WriteAllBytes(_keyPath, _encryptionKey);
+            }
+
+            if (File.Exists(_secureStoragePath))
+            {
+                LoadSecureValues();
+            }
         }
 
-        public async Task SetSecureValue(string key, string value)
+        public async Task<string> GetValue(string section, string key)
         {
-            var encryptedValue = await EncryptValue(value);
-            _cache.AddOrUpdate(key, encryptedValue, (_, _) => encryptedValue);
+            if (_secureValues.TryGetValue(section, out var sectionValues))
+            {
+                if (sectionValues.TryGetValue(key, out var encryptedValue))
+                {
+                    return Decrypt(encryptedValue);
+                }
+            }
+            return null;
+        }
+
+        public async Task SetValue(string section, string key, string value)
+        {
+            if (!_secureValues.ContainsKey(section))
+            {
+                _secureValues[section] = new Dictionary<string, string>();
+            }
+
+            _secureValues[section][key] = Encrypt(value);
             await SaveSecureValues();
         }
 
-        private async Task SaveSecureValues()
+        public async Task BackupSecureValues(string backupPath)
         {
-            try
+            var backupFilePath = Path.Combine(backupPath, "secure-config.dat");
+            var backupKeyPath = Path.Combine(backupPath, "secure-config.key");
+
+            File.Copy(_secureStoragePath, backupFilePath, true);
+            File.Copy(_keyPath, backupKeyPath, true);
+        }
+
+        public async Task RestoreSecureValues(string backupPath)
+        {
+            var backupFilePath = Path.Combine(backupPath, "secure-config.dat");
+            var backupKeyPath = Path.Combine(backupPath, "secure-config.key");
+
+            if (!File.Exists(backupFilePath) || !File.Exists(backupKeyPath))
             {
-                var json = JsonSerializer.Serialize(_cache);
-                var directory = Path.GetDirectoryName(_storagePath);
-                if (!string.IsNullOrEmpty(directory))
-                {
-                    Directory.CreateDirectory(directory);
-                }
-                await File.WriteAllTextAsync(_storagePath, json);
+                throw new FileNotFoundException("Backup files not found");
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error saving secure configuration values");
-                throw;
-            }
+
+            File.Copy(backupFilePath, _secureStoragePath, true);
+            File.Copy(backupKeyPath, _keyPath, true);
+
+            InitializeEncryption();
         }
 
         private void LoadSecureValues()
         {
-            try
-            {
-                if (File.Exists(_storagePath))
-                {
-                    var json = File.ReadAllText(_storagePath);
-                    var values = JsonSerializer.Deserialize<ConcurrentDictionary<string, string>>(json);
-                    if (values != null)
-                    {
-                        foreach (var (key, value) in values)
-                        {
-                            _cache.TryAdd(key, value);
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error loading secure configuration values");
-            }
+            var encryptedJson = File.ReadAllText(_secureStoragePath);
+            var decryptedJson = Decrypt(encryptedJson);
+            _secureValues = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, string>>>(decryptedJson);
         }
 
-        private async Task<string> EncryptValue(string value)
+        private async Task SaveSecureValues()
+        {
+            var json = JsonSerializer.Serialize(_secureValues);
+            var encryptedJson = Encrypt(json);
+            Directory.CreateDirectory(Path.GetDirectoryName(_secureStoragePath));
+            await File.WriteAllTextAsync(_secureStoragePath, encryptedJson);
+        }
+
+        private string Encrypt(string plainText)
         {
             using var aes = Aes.Create();
-            aes.Key = _key;
-
-            var iv = aes.IV;
-            using var encryptor = aes.CreateEncryptor();
-            using var msEncrypt = new MemoryStream();
+            aes.Key = _encryptionKey;
             
-            // Write IV first
-            await msEncrypt.WriteAsync(iv);
-
-            using (var csEncrypt = new CryptoStream(msEncrypt, encryptor, CryptoStreamMode.Write))
-            using (var swEncrypt = new StreamWriter(csEncrypt))
+            byte[] iv = aes.IV;
+            using var encryptor = aes.CreateEncryptor();
+            
+            byte[] encrypted;
+            using (var msEncrypt = new MemoryStream())
             {
-                await swEncrypt.WriteAsync(value);
+                msEncrypt.Write(iv, 0, iv.Length);
+                
+                using (var csEncrypt = new CryptoStream(msEncrypt, encryptor, CryptoStreamMode.Write))
+                using (var swEncrypt = new StreamWriter(csEncrypt))
+                {
+                    swEncrypt.Write(plainText);
+                }
+                
+                encrypted = msEncrypt.ToArray();
             }
-
-            var encrypted = msEncrypt.ToArray();
+            
             return Convert.ToBase64String(encrypted);
         }
 
-        private async Task<string> DecryptValue(string encryptedValue)
+        private string Decrypt(string cipherText)
         {
-            try
-            {
-                var fullCipher = Convert.FromBase64String(encryptedValue);
-
-                using var aes = Aes.Create();
-                var iv = new byte[aes.IV.Length];
-                var cipher = new byte[fullCipher.Length - iv.Length];
-
-                Buffer.BlockCopy(fullCipher, 0, iv, 0, iv.Length);
-                Buffer.BlockCopy(fullCipher, iv.Length, cipher, 0, cipher.Length);
-
-                aes.Key = _key;
-                aes.IV = iv;
-
-                using var decryptor = aes.CreateDecryptor();
-                using var msDecrypt = new MemoryStream(cipher);
-                using var csDecrypt = new CryptoStream(msDecrypt, decryptor, CryptoStreamMode.Read);
-                using var srDecrypt = new StreamReader(csDecrypt);
-
-                return await srDecrypt.ReadToEndAsync();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error decrypting configuration value");
-                return string.Empty;
-            }
-        }
-
-        private static byte[] DeriveKey(string seed)
-        {
-            using var deriveBytes = new Rfc2898DeriveBytes(
-                seed,
-                Encoding.UTF8.GetBytes("CodeBuddySalt"),
-                10000,
-                HashAlgorithmName.SHA256);
-
-            return deriveBytes.GetBytes(32); // 256 bits
+            byte[] fullCipher = Convert.FromBase64String(cipherText);
+            
+            using var aes = Aes.Create();
+            byte[] iv = new byte[16];
+            Array.Copy(fullCipher, 0, iv, 0, iv.Length);
+            
+            using var decryptor = aes.CreateDecryptor(_encryptionKey, iv);
+            
+            using var msDecrypt = new MemoryStream(fullCipher, iv.Length, fullCipher.Length - iv.Length);
+            using var csDecrypt = new CryptoStream(msDecrypt, decryptor, CryptoStreamMode.Read);
+            using var srDecrypt = new StreamReader(csDecrypt);
+            
+            return srDecrypt.ReadToEnd();
         }
     }
 }
