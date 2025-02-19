@@ -165,7 +165,57 @@ namespace CodeBuddy.Core.Implementation.Documentation
         public bool IncludeValidation { get; set; } = true;
         public bool CreateVersion { get; set; } = true;
         public bool ValidateDocumentation { get; set; } = true;
+        public bool GenerateTypeScriptTypes { get; set; } = true;
+        public bool GenerateDiagrams { get; set; } = true;
+        public bool GenerateArchitectureDocs { get; set; } = true;
+        public bool GenerateUserGuides { get; set; } = true;
+        public bool IncludeInCiPipeline { get; set; } = true;
         public string Version { get; set; }
         public string VersionDescription { get; set; }
+        public string OutputFormat { get; set; } = "markdown";
+        public string[] ExcludedNamespaces { get; set; } = Array.Empty<string>();
+        public string[] IncludedNamespaces { get; set; } = Array.Empty<string>();
+        public DiagramOptions DiagramOptions { get; set; } = new DiagramOptions();
+        public ValidationOptions ValidationOptions { get; set; } = new ValidationOptions();
+        public TypeScriptOptions TypeScriptOptions { get; set; } = new TypeScriptOptions();
+    }
+
+    public class DiagramOptions
+    {
+        public bool IncludeClassDiagrams { get; set; } = true;
+        public bool IncludeSequenceDiagrams { get; set; } = true;
+        public bool IncludeComponentDiagrams { get; set; } = true;
+        public bool IncludeArchitectureDiagrams { get; set; } = true;
+        public string DiagramEngine { get; set; } = "plantuml";
+        public string OutputFormat { get; set; } = "svg";
+    }
+
+    public class ValidationOptions
+    {
+        public bool ValidateExamples { get; set; } = true;
+        public bool ValidateCrossReferences { get; set; } = true;
+        public bool ValidateLinks { get; set; } = true;
+        public bool ValidateCodeSnippets { get; set; } = true;
+        public bool ValidateMarkdown { get; set; } = true;
+        public int MinimumDocumentationCoverage { get; set; } = 80;
+        public string[] RequiredSections { get; set; } = new[]
+        {
+            "Overview",
+            "Installation",
+            "Usage",
+            "API Reference",
+            "Examples"
+        };
+    }
+
+    public class TypeScriptOptions
+    {
+        public bool GenerateEnums { get; set; } = true;
+        public bool GenerateInterfaces { get; set; } = true;
+        public bool GenerateClasses { get; set; } = true;
+        public bool IncludeJsDoc { get; set; } = true;
+        public bool StrictNullChecks { get; set; } = true;
+        public string ModuleFormat { get; set; } = "esm";
+        public string OutputPath { get; set; } = "docs/typescript";
     }
 }

@@ -1,68 +1,110 @@
-# {{name}} Plugin
+# {{PluginName}}
 
-**Version:** {{version}}
-
-{{description}}
+{{Description}}
 
 ## Overview
-This document describes how to use and configure the {{name}} plugin.
+
+{{Overview}}
 
 ## Features
-{{#each features}}
-- {{this}}
+
+{{#each Features}}
+- {{Name}}: {{Description}}
 {{/each}}
 
 ## Installation
+
 ```bash
-{{installCommand}}
+dotnet add package {{PackageName}}
 ```
 
 ## Configuration
+
 ```json
-{
-{{#each configOptions}}
-  "{{name}}": {{defaultValue}}, // {{description}}
-{{/each}}
-}
+{{ConfigurationExample}}
 ```
 
-## Usage Examples
-{{#each examples}}
-### {{title}}
-{{description}}
+### Configuration Options
 
-```{{language}}
-{{code}}
+| Option | Type | Required | Default | Description |
+|--------|------|-----------|---------|-------------|
+{{#each ConfigurationOptions}}
+| {{Name}} | {{Type}} | {{Required}} | {{Default}} | {{Description}} |
+{{/each}}
+
+## Usage
+
+### Basic Usage
+
+```csharp
+{{BasicUsageExample}}
+```
+
+### Advanced Scenarios
+
+{{#each AdvancedScenarios}}
+#### {{Name}}
+
+{{Description}}
+
+```csharp
+{{Example}}
 ```
 {{/each}}
 
 ## API Reference
-{{#each api}}
-### {{name}}
-{{description}}
 
-#### Parameters
-{{#if parameters}}
-| Name | Type | Description |
-|------|------|-------------|
-{{#each parameters}}
-| {{name}} | {{type}} | {{description}} |
+{{#each Types}}
+### {{Name}}
+
+{{Description}}
+
+#### Methods
+
+{{#each Methods}}
+##### {{Name}}
+
+{{Description}}
+
+Parameters:
+{{#each Parameters}}
+- `{{Name}}` ({{Type}}): {{Description}}
 {{/each}}
-{{else}}
-No parameters required.
-{{/if}}
 
-#### Returns
-{{returnType}} - {{returnDescription}}
+Returns: {{ReturnType}}
+{{/each}}
+{{/each}}
+
+## Examples
+
+{{#each Examples}}
+### {{Name}}
+
+{{Description}}
+
+```csharp
+{{Code}}
+```
 {{/each}}
 
 ## Troubleshooting
-{{#each troubleshooting}}
-### {{problem}}
-{{solution}}
+
+{{#each TroubleshootingItems}}
+### {{Problem}}
+
+{{Solution}}
 {{/each}}
 
-## Known Issues
-{{#each issues}}
+## Best Practices
+
+{{BestPractices}}
+
+## Version History
+
+{{#each Versions}}
+### {{Version}} ({{Date}})
+
+{{#each Changes}}
 - {{this}}
+{{/each}}
 {{/each}}

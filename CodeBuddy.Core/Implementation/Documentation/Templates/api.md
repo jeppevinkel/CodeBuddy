@@ -1,63 +1,72 @@
-# {{name}}
+# {{ApiName}}
 
-**Namespace:** {{namespace}}
+{{Description}}
 
-{{description}}
+## Overview
 
-## Type Information
-- **Assembly:** {{assembly}}
-- **Base Type:** {{baseType}}
-{{#if interfaces}}
-- **Implements:**
-{{#each interfaces}}
-  - {{this}}
-{{/each}}
-{{/if}}
+{{Overview}}
 
-## Properties
-{{#if properties}}
+## Installation
+
+```bash
+dotnet add package CodeBuddy
+```
+
+## Basic Usage
+
+```csharp
+{{BasicUsageExample}}
+```
+
+## API Reference
+
+{{#each Types}}
+### {{Name}}
+
+{{Description}}
+
+#### Properties
+
 | Name | Type | Description |
 |------|------|-------------|
-{{#each properties}}
-| {{name}} | {{type}} | {{description}} |
+{{#each Properties}}
+| {{Name}} | {{Type}} | {{Description}} |
 {{/each}}
-{{else}}
-This type has no public properties.
-{{/if}}
 
-## Methods
-{{#if methods}}
-{{#each methods}}
-### {{name}}
-{{description}}
+#### Methods
 
-#### Parameters
-{{#if parameters}}
-| Name | Type | Description |
-|------|------|-------------|
-{{#each parameters}}
-| {{name}} | {{type}} | {{description}} |
+{{#each Methods}}
+##### {{Name}}
+
+{{Description}}
+
+Parameters:
+{{#each Parameters}}
+- `{{Name}}` ({{Type}}): {{Description}}
 {{/each}}
-{{else}}
-This method takes no parameters.
-{{/if}}
 
-#### Returns
-{{returnType}}
+Returns: {{ReturnType}}
 
-{{#if examples}}
-#### Examples
-{{#each examples}}
-```{{language}}
-{{code}}
+Example:
+```csharp
+{{Example}}
 ```
 {{/each}}
-{{/if}}
 
 {{/each}}
-{{else}}
-This type has no public methods.
-{{/if}}
 
-## Usage Notes
-{{usageNotes}}
+## Advanced Usage
+
+{{AdvancedUsage}}
+
+## Best Practices
+
+{{BestPractices}}
+
+## Common Issues and Solutions
+
+{{Troubleshooting}}
+
+## Related Resources
+
+{{RelatedResources}}

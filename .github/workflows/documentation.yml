@@ -1,0 +1,88 @@
+name: Documentation
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '**.cs'
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '**.cs'
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v1
+        with:
+          dotnet-version: 7.0.x
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: '18'
+
+      - name: Install PlantUML
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y plantuml
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore
+
+      - name: Generate Documentation
+        run: |
+          dotnet run --project CodeBuddy.CLI/CodeBuddy.CLI.csproj -- generate-docs \
+            --include-typescript \
+            --include-diagrams \
+            --validate \
+            --create-version \
+            --output-path ./docs
+
+      - name: Validate Documentation
+        run: |
+          dotnet run --project CodeBuddy.CLI/CodeBuddy.CLI.csproj -- validate-docs \
+            --min-coverage 80 \
+            --check-links \
+            --check-examples
+
+      - name: Generate TypeScript Definitions
+        run: |
+          dotnet run --project CodeBuddy.CLI/CodeBuddy.CLI.csproj -- generate-typescript \
+            --output ./docs/typescript
+
+      - name: Deploy Documentation
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs
+          commit_message: 'docs: update documentation'
+
+      - name: Check Documentation Coverage
+        run: |
+          dotnet run --project CodeBuddy.CLI/CodeBuddy.CLI.csproj -- check-coverage \
+            --min-coverage 80 \
+            --fail-if-below
+
+      - name: Upload Documentation Artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: documentation
+          path: |
+            docs/
+            !docs/.git

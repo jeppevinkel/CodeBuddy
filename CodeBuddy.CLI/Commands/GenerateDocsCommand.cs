@@ -1,209 +1,134 @@
 using System;
 using System.CommandLine;
+using System.CommandLine.Invocation;
 using System.Threading.Tasks;
 using CodeBuddy.Core.Interfaces;
 using CodeBuddy.Core.Implementation.Documentation;
-using System.CommandLine;
-using System.Threading.Tasks;
+
 namespace CodeBuddy.CLI.Commands
 {
-    /// <summary>
-    /// CLI command to generate documentation
-    /// </summary>
-    public class GenerateDocsCommand : Command
-    {
-        private readonly DocumentationAPI _docApi;
-
-        public GenerateDocsCommand(DocumentationAPI docApi) 
-            : base("docs", "Generate and manage documentation")
-        {
-            _docApi = docApi;
-
-            // Add subcommands
-            AddCommand(new Command("generate", "Generate documentation")
-            {
-                new Option<bool>("--validate", "Validate generated documentation"),
-                new Option<bool>("--plugins", "Include plugin documentation"),
-                new Option<bool>("--version", "Create new documentation version"),
-                new Option<string>("--version-desc", "Version description")
-            });
-
-            AddCommand(new Command("validate", "Validate existing documentation"));
-            
-            AddCommand(new Command("versions", "List documentation versions"));
-            
-            AddCommand(new Command("diff", "Show differences between versions")
-            {
-                new Argument<string>("from", "Source version"),
-                new Argument<string>("to", "Target version")
-            });
-
-            // Set handlers
-            this.SetHandler(DefaultHandler);
-        }
-
-        private async Task DefaultHandler()
-        {
-            await GenerateHandler(true, true, true, null);
-        }
-
-        private async Task GenerateHandler(bool validate, bool plugins, bool version, string versionDesc)
-        {
-            var options = new GenerationOptions
-            {
-                ValidateDocumentation = validate,
-                IncludePlugins = plugins,
-                CreateVersion = version,
-                VersionDescription = versionDesc
-            };
-
-            var result = await _docApi.GenerateDocumentationAsync(options);
-            
-            if (result.Success)
-            {
-                Console.WriteLine("Documentation generated successfully");
-                if (result.ValidationResult != null)
-                {
-                    Console.WriteLine($"Documentation quality score: {result.ValidationResult.QualityScore:P}");
-                    foreach (var issue in result.ValidationResult.Issues)
-                    {
-                        Console.WriteLine($"- {issue.Type}: {issue.Message} in {issue.Component}");
-                    }
-                }
-            }
-            else
-            {
-                Console.WriteLine($"Error generating documentation: {result.Error}");
-            }
-        }
-
-        private async Task ValidateHandler()
-        {
-            var result = await _docApi.ValidateDocumentationAsync();
-            
-            if (result.Success)
-            {
-                Console.WriteLine($"Documentation quality score: {result.QualityScore:P}");
-                foreach (var issue in result.Issues)
-                {
-                    Console.WriteLine($"- {issue.Type}: {issue.Message} in {issue.Component}");
-                }
-            }
-            else
-            {
-                Console.WriteLine($"Error validating documentation: {result.Error}");
-            }
-        }
-
-        private async Task ListVersionsHandler()
-        {
-            var result = await _docApi.GetVersionHistoryAsync();
-            
-            if (result.Success)
-            {
-                Console.WriteLine("Documentation versions:");
-                foreach (var version in result.Versions)
-                {
-                    Console.WriteLine($"- {version.Version} ({version.CreatedAt:yyyy-MM-dd HH:mm:ss}): {version.Description}");
-                }
-            }
-            else
-            {
-                Console.WriteLine($"Error retrieving versions: {result.Error}");
-            }
-        }
-
-        private async Task DiffVersionsHandler(string fromVersion, string toVersion)
-        {
-            var changes = await _docApi.GetVersionChangesAsync(fromVersion, toVersion);
-            
-            Console.WriteLine($"Changes between {fromVersion} and {toVersion}:");
-            foreach (var change in changes.ChangedFiles)
-            {
-                var changeType = change.ChangeType.ToString().ToUpper();
-                Console.WriteLine($"[{changeType}] {change.File}");
-            }
-        }
-    }/// <summary>
-    /// Command line interface for documentation generation
-    /// </summary>
     public class GenerateDocsCommand : Command
     {
         private readonly IDocumentationGenerator _docGenerator;
+        private readonly Option<bool> _includeTypescript;
+        private readonly Option<bool> _includeDiagrams;
+        private readonly Option<bool> _validate;
+        private readonly Option<bool> _createVersion;
+        private readonly Option<string> _outputPath;
+        private readonly Option<string> _version;
+        private readonly Option<string> _versionDescription;
+        private readonly Option<int> _minCoverage;
 
-        public GenerateDocsCommand(IDocumentationGenerator docGenerator)
-            : base("generate-docs", "Generate documentation for the codebase")
+        public GenerateDocsCommand(IDocumentationGenerator docGenerator) : base(
+            name: "generate-docs",
+            description: "Generate comprehensive documentation")
         {
             _docGenerator = docGenerator;
 
-            var typeOption = new Option<string>(
-                "--type",
-                "Type of documentation to generate (api, plugin, validation, all)");
-            AddOption(typeOption);
+            _includeTypescript = new Option<bool>(
+                aliases: new[] { "--include-typescript", "-t" },
+                description: "Generate TypeScript definitions",
+                getDefaultValue: () => true);
 
-            this.SetHandler(HandleCommand, typeOption);
+            _includeDiagrams = new Option<bool>(
+                aliases: new[] { "--include-diagrams", "-d" },
+                description: "Generate architecture diagrams",
+                getDefaultValue: () => true);
+
+            _validate = new Option<bool>(
+                aliases: new[] { "--validate", "-v" },
+                description: "Validate documentation",
+                getDefaultValue: () => true);
+
+            _createVersion = new Option<bool>(
+                aliases: new[] { "--create-version" },
+                description: "Create a new documentation version",
+                getDefaultValue: () => true);
+
+            _outputPath = new Option<string>(
+                aliases: new[] { "--output-path", "-o" },
+                description: "Output directory for documentation",
+                getDefaultValue: () => "./docs");
+
+            _version = new Option<string>(
+                aliases: new[] { "--version" },
+                description: "Documentation version");
+
+            _versionDescription = new Option<string>(
+                aliases: new[] { "--version-description" },
+                description: "Documentation version description");
+
+            _minCoverage = new Option<int>(
+                aliases: new[] { "--min-coverage", "-c" },
+                description: "Minimum documentation coverage percentage",
+                getDefaultValue: () => 80);
+
+            AddOption(_includeTypescript);
+            AddOption(_includeDiagrams);
+            AddOption(_validate);
+            AddOption(_createVersion);
+            AddOption(_outputPath);
+            AddOption(_version);
+            AddOption(_versionDescription);
+            AddOption(_minCoverage);
+
+            this.SetHandler(HandleCommand);
         }
 
-        private async Task HandleCommand(string type)
+        private async Task HandleCommand(InvocationContext context)
         {
             try
             {
-                Console.WriteLine($"Generating {type} documentation...");
-
-                switch (type.ToLower())
+                var options = new GenerationOptions
                 {
-                    case "api":
-                        var apiResult = await _docGenerator.GenerateApiDocumentationAsync();
-                        HandleResult(apiResult);
-                        break;
+                    GenerateTypeScriptTypes = context.ParseResult.GetValueForOption(_includeTypescript),
+                    GenerateDiagrams = context.ParseResult.GetValueForOption(_includeDiagrams),
+                    ValidateDocumentation = context.ParseResult.GetValueForOption(_validate),
+                    CreateVersion = context.ParseResult.GetValueForOption(_createVersion),
+                    Version = context.ParseResult.GetValueForOption(_version),
+                    VersionDescription = context.ParseResult.GetValueForOption(_versionDescription),
+                    ValidationOptions = new ValidationOptions
+                    {
+                        MinimumDocumentationCoverage = context.ParseResult.GetValueForOption(_minCoverage)
+                    }
+                };
 
-                    case "plugin":
-                        var pluginResult = await _docGenerator.GeneratePluginDocumentationAsync();
-                        HandleResult(pluginResult);
-                        break;
+                Console.WriteLine("Generating documentation...");
+                
+                var documentationApi = new DocumentationAPI(_docGenerator, 
+                    new DocumentationValidator(), 
+                    new DocumentationVersionManager(new FileOperations()));
 
-                    case "validation":
-                        var validationResult = await _docGenerator.GenerateValidationDocumentationAsync();
-                        HandleResult(validationResult);
-                        break;
+                var result = await documentationApi.GenerateDocumentationAsync(options);
 
-                    case "all":
-                        var apiRes = await _docGenerator.GenerateApiDocumentationAsync();
-                        var pluginRes = await _docGenerator.GeneratePluginDocumentationAsync();
-                        var validationRes = await _docGenerator.GenerateValidationDocumentationAsync();
+                if (result.Success)
+                {
+                    Console.WriteLine("Documentation generated successfully");
+                    
+                    if (result.ValidationResult != null)
+                    {
+                        Console.WriteLine($"Documentation coverage: {result.ValidationResult.Coverage}%");
+                        foreach (var issue in result.ValidationResult.Issues)
+                        {
+                            Console.WriteLine($"- {issue.Severity}: {issue.Description}");
+                        }
+                    }
 
-                        HandleResult(apiRes);
-                        HandleResult(pluginRes);
-                        HandleResult(validationRes);
-                        break;
-
-                    default:
-                        Console.WriteLine($"Unknown documentation type: {type}");
-                        Console.WriteLine("Valid types: api, plugin, validation, all");
-                        break;
+                    if (result.Version != null)
+                    {
+                        Console.WriteLine($"Created documentation version: {result.Version.Version}");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"Error generating documentation: {result.Error}");
+                    context.ExitCode = 1;
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error generating documentation: {ex.Message}");
-            }
-        }
-
-        private void HandleResult(Core.Models.Documentation.DocumentationResult result)
-        {
-            if (result.Success)
-            {
-                Console.WriteLine("Documentation generated successfully.");
-                Console.WriteLine($"Generated {result.Types.Count} type documentations");
-                Console.WriteLine($"Generated {result.Plugins.Count} plugin documentations");
-                if (result.Validation != null)
-                {
-                    Console.WriteLine($"Generated validation documentation with {result.Validation.Components.Count} components");
-                }
-            }
-            else
-            {
-                Console.WriteLine($"Failed to generate documentation: {result.Error}");
+                Console.WriteLine($"Error: {ex.Message}");
+                context.ExitCode = 1;
             }
         }
     }
