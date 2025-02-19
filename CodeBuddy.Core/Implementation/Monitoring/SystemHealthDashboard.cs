@@ -16,13 +16,16 @@ namespace CodeBuddy.Core.Implementation.Monitoring
         private readonly ConfigurationMigrationManager _migrationManager;
         private readonly Dictionary<Type, object> _activeConfigurations;
         private readonly List<ConfigurationHealthCheck> _healthChecks;
+        private readonly ConfigurationValidationDashboard _configDashboard;
 
         public SystemHealthDashboard(
             ConfigurationValidationManager validationManager,
-            ConfigurationMigrationManager migrationManager)
+            ConfigurationMigrationManager migrationManager,
+            ConfigurationValidationDashboard configDashboard)
         {
             _validationManager = validationManager;
             _migrationManager = migrationManager;
+            _configDashboard = configDashboard;
             _activeConfigurations = new Dictionary<Type, object>();
             _healthChecks = new List<ConfigurationHealthCheck>();
         }
@@ -115,6 +118,70 @@ namespace CodeBuddy.Core.Implementation.Monitoring
             return report;
         }
 
+        /// <summary>
+        /// Gets configuration health metrics from the validation dashboard
+        /// </summary>
+        public async Task<ConfigurationHealthStatus> GetConfigurationHealthMetricsAsync()
+        {
+            return await _configDashboard.GetConfigurationHealthOverviewAsync();
+        }
+
+        /// <summary>
+        /// Gets validation status by component from the validation dashboard
+        /// </summary>
+        public async Task<Dictionary<string, ComponentValidationStatus>> GetValidationStatusByComponentAsync()
+        {
+            return await _configDashboard.GetValidationStatusByComponentAsync();
+        }
+
+        /// <summary>
+        /// Gets migration history from the validation dashboard
+        /// </summary>
+        public async Task<List<MigrationHistoryEntry>> GetMigrationHistoryAsync()
+        {
+            return await _configDashboard.GetMigrationHistoryAsync();
+        }
+
+        /// <summary>
+        /// Gets environment-specific configuration status from the validation dashboard
+        /// </summary>
+        public async Task<EnvironmentConfigurationStatus> GetEnvironmentConfigurationStatusAsync(string environment)
+        {
+            return await _configDashboard.GetEnvironmentConfigurationStatusAsync(environment);
+        }
+
+        /// <summary>
+        /// Reports a configuration issue to the health monitoring system
+        /// </summary>
+        public async Task ReportConfigurationIssueAsync(ConfigurationHealthReport report)
+        {
+            var check = new ConfigurationHealthCheck
+            {
+                LastCheck = report.Timestamp,
+                Status = MapSeverityToStatus(report.Severity),
+                Issues = new List<string> { report.Message }
+            };
+
+            _healthChecks.Add(check);
+            
+            // If the issue is critical, trigger immediate health check
+            if (report.Severity >= WarningSeverity.Error)
+            {
+                await CheckHealthAsync();
+            }
+        }
+
+        private ConfigurationHealthStatus MapSeverityToStatus(WarningSeverity severity)
+        {
+            return severity switch
+            {
+                WarningSeverity.Critical => ConfigurationHealthStatus.Error,
+                WarningSeverity.Error => ConfigurationHealthStatus.Invalid,
+                WarningSeverity.Warning => ConfigurationHealthStatus.RequiresMigration,
+                _ => ConfigurationHealthStatus.Unknown
+            };
+        }
+
         private void ValidateEnvironmentSettings(object config, ConfigurationHealthCheck check)
         {
             var properties = config.GetType().GetProperties();
@@ -136,6 +203,15 @@ namespace CodeBuddy.Core.Implementation.Monitoring
                 }
             }
         }
+    }
+
+    public class ConfigurationHealthReport
+    {
+        public DateTime Timestamp { get; set; }
+        public WarningSeverity Severity { get; set; }
+        public string Message { get; set; }
+        public string Type { get; set; }
+        public string AffectedComponent { get; set; }
     }
 
     public class SystemHealthReport

@@ -17,19 +17,22 @@ namespace CodeBuddy.Core.Implementation.Configuration
         private readonly IConfigurationMigrationManager _migrationManager;
         private readonly IPluginManager _pluginManager;
         private readonly ILoggingService _logger;
+        private readonly SystemHealthDashboard _systemHealthDashboard;
 
         public ConfigurationValidationDashboard(
             IConfigurationManager configManager,
             IConfigurationValidator configValidator,
             IConfigurationMigrationManager migrationManager,
             IPluginManager pluginManager,
-            ILoggingService logger)
+            ILoggingService logger,
+            SystemHealthDashboard systemHealthDashboard)
         {
             _configManager = configManager ?? throw new ArgumentNullException(nameof(configManager));
             _configValidator = configValidator ?? throw new ArgumentNullException(nameof(configValidator));
             _migrationManager = migrationManager ?? throw new ArgumentNullException(nameof(migrationManager));
             _pluginManager = pluginManager ?? throw new ArgumentNullException(nameof(pluginManager));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _systemHealthDashboard = systemHealthDashboard ?? throw new ArgumentNullException(nameof(systemHealthDashboard));
         }
 
         /// <summary>
@@ -205,9 +208,18 @@ namespace CodeBuddy.Core.Implementation.Configuration
 
         private async Task TriggerConfigurationAlertAsync(ConfigurationWarning warning)
         {
-            // Alert implementation
-            // TODO: Integrate with alert system
+            // Log the warning
             await _logger.LogWarningAsync($"Configuration Alert: {warning.Message}");
+            
+            // Integrate with system health dashboard
+            await _systemHealthDashboard.ReportConfigurationIssueAsync(new ConfigurationHealthReport
+            {
+                Timestamp = warning.Timestamp,
+                Severity = warning.Severity,
+                Message = warning.Message,
+                Type = warning.Type.ToString(),
+                AffectedComponent = "Configuration"
+            });
         }
     }
 }
