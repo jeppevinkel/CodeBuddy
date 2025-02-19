@@ -3,101 +3,132 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
 using System.Threading.Tasks;
-using Microsoft.Extensions.DependencyInjection;
-using CodeBuddy.Core.Interfaces;
+using Microsoft.Extensions.Logging;
 using CodeBuddy.Core.Models.Configuration;
+using CodeBuddy.Core.Interfaces;
 
 namespace CodeBuddy.Core.Implementation.Configuration
 {
     /// <summary>
-    /// Manages configuration validation including custom validation rules
+    /// Manages configuration validation and schema versioning
     /// </summary>
-    public class ConfigurationValidationManager
+    public class ConfigurationValidationManager : IConfigurationValidator
     {
-        private readonly IServiceProvider _serviceProvider;
-        private readonly Dictionary<Type, IConfigurationValidator> _validators = new();
+        private readonly ILogger _logger;
+        private readonly Dictionary<Type, IList<ValidationAttribute>> _customValidators = new();
+        private readonly HashSet<Type> _reloadableTypes = new();
 
-        public ConfigurationValidationManager(IServiceProvider serviceProvider)
+        public ConfigurationValidationManager(ILogger logger)
         {
-            _serviceProvider = serviceProvider;
+            _logger = logger;
         }
 
-        public void RegisterConfiguration<T>() where T : class
+        public void RegisterValidationRules<T>(IEnumerable<ValidationAttribute> validators)
         {
-            var type = typeof(T);
-            if (!_validators.ContainsKey(type))
+            if (!_customValidators.ContainsKey(typeof(T)))
             {
-                var validator = _serviceProvider.GetService<IConfigurationValidator<T>>();
-                if (validator != null)
+                _customValidators[typeof(T)] = new List<ValidationAttribute>();
+            }
+
+            foreach (var validator in validators)
+            {
+                _customValidators[typeof(T)].Add(validator);
+            }
+        }
+
+        public void RegisterReloadableConfiguration<T>()
+        {
+            _reloadableTypes.Add(typeof(T));
+        }
+
+        public async Task<ValidationResult?> ValidateConfigurationAsync<T>(T configuration) where T : BaseConfiguration
+        {
+            if (configuration == null)
+            {
+                return new ValidationResult("Configuration cannot be null");
+            }
+
+            try
+            {
+                // Run base configuration validation
+                var baseResult = configuration.Validate();
+                if (baseResult != ValidationResult.Success)
                 {
-                    _validators[type] = validator;
+                    return baseResult;
                 }
-            }
-        }
 
-        public async Task<(bool IsValid, ValidationSeverity Severity, IEnumerable<string> Errors)> ValidateAsync<T>(T configuration) where T : class
-        {
-            var errors = new List<string>();
-            var severity = ValidationSeverity.None;
-
-            // Standard validation
-            var validationResults = new List<ValidationResult>();
-            var validationContext = new ValidationContext(configuration);
-            
-            if (!Validator.TryValidateObject(configuration, validationContext, validationResults, true))
-            {
-                errors.AddRange(validationResults.Select(r => r.ErrorMessage!));
-                severity = ValidationSeverity.Error;
-            }
-
-            // Environment-specific validation
-            var envSpecificErrors = ValidateEnvironmentSpecific(configuration);
-            if (envSpecificErrors.Any())
-            {
-                errors.AddRange(envSpecificErrors);
-                severity = ValidationSeverity.Error;
-            }
-
-            // Custom validator
-            if (_validators.TryGetValue(typeof(T), out var validator))
-            {
-                var customValidation = await validator.ValidateAsync(configuration);
-                if (!customValidation.IsValid)
+                // Validate environment
+                if (!string.IsNullOrEmpty(configuration.Environment))
                 {
-                    errors.AddRange(customValidation.Errors);
-                    severity = customValidation.Severity;
-                }
-            }
+                    var envAttr = typeof(T).GetCustomAttributes(typeof(EnvironmentSpecificAttribute), true)
+                        .FirstOrDefault() as EnvironmentSpecificAttribute;
 
-            return (!errors.Any(), severity, errors);
-        }
-
-        private IEnumerable<string> ValidateEnvironmentSpecific<T>(T configuration)
-        {
-            var errors = new List<string>();
-            var currentEnv = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
-
-            foreach (var prop in typeof(T).GetProperties())
-            {
-                var envAttr = prop.GetCustomAttribute<EnvironmentSpecificAttribute>();
-                if (envAttr != null)
-                {
-                    if (!string.IsNullOrEmpty(currentEnv) && 
-                        !envAttr.Environments.Contains(currentEnv, StringComparer.OrdinalIgnoreCase))
+                    if (envAttr != null && !envAttr.ValidEnvironments.Contains(configuration.Environment))
                     {
-                        errors.Add($"Property {prop.Name} is only valid in environments: {string.Join(", ", envAttr.Environments)}");
+                        return new ValidationResult(
+                            $"Invalid environment '{configuration.Environment}'. Valid values are: {string.Join(", ", envAttr.ValidEnvironments)}");
                     }
                 }
-            }
 
-            return errors;
+                // Check if hot-reload is allowed
+                if (configuration.IsReloadable && !_reloadableTypes.Contains(typeof(T)))
+                {
+                    return new ValidationResult($"Configuration type {typeof(T).Name} does not support hot-reload");
+                }
+
+                // Run custom validators
+                if (_customValidators.TryGetValue(typeof(T), out var validators))
+                {
+                    foreach (var validator in validators)
+                    {
+                        var context = new ValidationContext(configuration);
+                        var results = new List<ValidationResult>();
+
+                        if (!Validator.TryValidateValue(configuration, context, results, new[] { validator }))
+                        {
+                            return results.FirstOrDefault();
+                        }
+                    }
+                }
+
+                // Run data annotation validations
+                var validationResults = new List<ValidationResult>();
+                var validationContext = new ValidationContext(configuration);
+
+                if (!Validator.TryValidateObject(configuration, validationContext, validationResults, true))
+                {
+                    return validationResults.FirstOrDefault();
+                }
+
+                _logger.LogInformation("Configuration validation successful for type {Type}", typeof(T).Name);
+                return ValidationResult.Success;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error validating configuration of type {Type}", typeof(T).Name);
+                return new ValidationResult($"Validation error: {ex.Message}");
+            }
+        }
+
+        public bool IsReloadable<T>()
+        {
+            return _reloadableTypes.Contains(typeof(T));
         }
     }
 
-    public enum ValidationSeverity
+    [AttributeUsage(AttributeTargets.Property)]
+    public class ReloadableAttribute : Attribute
     {
-        None,
-        Warning,
-        Error
+    }
+
+    [AttributeUsage(AttributeTargets.Class | AttributeTargets.Property)]
+    public class EnvironmentSpecificAttribute : Attribute
+    {
+        public string[] ValidEnvironments { get; }
+
+        public EnvironmentSpecificAttribute(params string[] validEnvironments)
+        {
+            ValidEnvironments = validEnvironments;
+        }
     }
 }

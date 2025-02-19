@@ -1,71 +1,36 @@
-using System.Collections.Generic;
-using System.ComponentModel.DataAnnotations;
+using System;
 using System.Threading.Tasks;
+using CodeBuddy.Core.Models.Configuration;
 
-namespace CodeBuddy.Core.Interfaces;
-
-/// <summary>
-/// Manages application configuration with support for validation, migration, and secure storage
-/// </summary>
-public interface IConfigurationManager
+namespace CodeBuddy.Core.Interfaces
 {
     /// <summary>
-    /// Gets configuration for a section with automatic migration if needed
+    /// Interface for managing application configuration
     /// </summary>
-    Task<T> GetConfiguration<T>(string section) where T : class, new();
-    
-    /// <summary>
-    /// Gets configuration with support for environment-specific overrides
-    /// </summary>
-    Task<T> GetConfiguration<T>(string section, string environment) where T : class, new();
-    
-    /// <summary>
-    /// Saves configuration with validation and versioning
-    /// </summary>
-    Task SaveConfiguration<T>(string section, T configuration) where T : class;
-    
-    /// <summary>
-    /// Validates configuration and returns detailed validation results
-    /// </summary>
-    IEnumerable<ValidationResult> ValidateConfiguration<T>(T configuration) where T : class;
-    
-    /// <summary>
-    /// Gets configuration schema version for a section
-    /// </summary>
-    string GetConfigurationVersion(string section);
+    public interface IConfigurationManager
+    {
+        /// <summary>
+        /// Gets a configuration section
+        /// </summary>
+        /// <typeparam name="T">Configuration type</typeparam>
+        /// <param name="section">Configuration section name</param>
+        /// <returns>Configuration instance</returns>
+        Task<T> GetConfigurationAsync<T>(string section) where T : BaseConfiguration, new();
 
-    /// <summary>
-    /// Registers configuration change notification
-    /// </summary>
-    void RegisterChangeCallback<T>(string section, Action<T> callback) where T : class;
+        /// <summary>
+        /// Saves a configuration section
+        /// </summary>
+        /// <typeparam name="T">Configuration type</typeparam>
+        /// <param name="section">Configuration section name</param>
+        /// <param name="configuration">Configuration instance to save</param>
+        Task SaveConfigurationAsync<T>(string section, T configuration) where T : BaseConfiguration;
 
-    /// <summary>
-    /// Gets secure configuration value
-    /// </summary>
-    Task<string> GetSecureValue(string section, string key);
-
-    /// <summary>
-    /// Sets secure configuration value
-    /// </summary>
-    Task SetSecureValue(string section, string key, string value);
-
-    /// <summary>
-    /// Backs up configuration to specified location
-    /// </summary>
-    Task BackupConfiguration(string backupPath);
-
-    /// <summary>
-    /// Restores configuration from backup
-    /// </summary>
-    Task RestoreConfiguration(string backupPath);
-
-    /// <summary>
-    /// Gets configuration metadata for a section
-    /// </summary>
-    Task<IDictionary<string, string>> GetConfigurationMetadata(string section);
-
-    /// <summary>
-    /// Generates configuration documentation
-    /// </summary>
-    Task<string> GenerateConfigurationDocumentation();
+        /// <summary>
+        /// Registers a callback to be invoked when configuration changes
+        /// </summary>
+        /// <typeparam name="T">Configuration type</typeparam>
+        /// <param name="section">Configuration section name</param>
+        /// <param name="callback">Callback to invoke</param>
+        void RegisterConfigurationChangeCallback<T>(string section, Action<T> callback) where T : BaseConfiguration;
+    }
 }

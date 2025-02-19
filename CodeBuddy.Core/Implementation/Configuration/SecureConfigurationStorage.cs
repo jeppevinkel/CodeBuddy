@@ -1,146 +1,121 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
+using System.Security.Cryptography;
 using System.Threading.Tasks;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 
 namespace CodeBuddy.Core.Implementation.Configuration
 {
     /// <summary>
-    /// Provides secure storage for sensitive configuration values
+    /// Provides secure storage and retrieval of sensitive configuration values
     /// </summary>
     public class SecureConfigurationStorage
     {
         private readonly ILogger _logger;
-        private readonly string _secureStoragePath;
-        private readonly byte[] _encryptionKey;
-        private readonly Dictionary<string, string> _cache = new();
+        private readonly string _keyPath;
+        private readonly string _configPath;
 
-        public SecureConfigurationStorage(ILogger logger)
+        public SecureConfigurationStorage(ILogger logger, string keyPath, string configPath)
         {
             _logger = logger;
-            _secureStoragePath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "CodeBuddy",
-                "secure_config.dat"
-            );
-            
-            // Initialize or load encryption key
-            var keyPath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "CodeBuddy",
-                "key.dat"
-            );
-            
-            Directory.CreateDirectory(Path.GetDirectoryName(keyPath)!);
-            
-            if (File.Exists(keyPath))
-            {
-                _encryptionKey = File.ReadAllBytes(keyPath);
-            }
-            else
-            {
-                _encryptionKey = new byte[32];
-                using (var rng = new RNGCryptoServiceProvider())
-                {
-                    rng.GetBytes(_encryptionKey);
-                }
-                File.WriteAllBytes(keyPath, _encryptionKey);
-            }
+            _keyPath = keyPath;
+            _configPath = configPath;
 
-            LoadSecureValues();
+            // Ensure directories exist
+            Directory.CreateDirectory(Path.GetDirectoryName(keyPath));
+            Directory.CreateDirectory(Path.GetDirectoryName(configPath));
         }
 
-        private void LoadSecureValues()
-        {
-            if (File.Exists(_secureStoragePath))
-            {
-                try
-                {
-                    var encryptedData = File.ReadAllBytes(_secureStoragePath);
-                    var decryptedJson = Decrypt(encryptedData);
-                    var values = JsonSerializer.Deserialize<Dictionary<string, string>>(decryptedJson);
-                    if (values != null)
-                    {
-                        foreach (var (key, value) in values)
-                        {
-                            _cache[key] = value;
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error loading secure configuration values");
-                }
-            }
-        }
-
-        private async Task SaveSecureValues()
+        public async Task<T?> LoadSecureConfigurationAsync<T>(string section) where T : class
         {
             try
             {
-                var json = JsonSerializer.Serialize(_cache);
-                var encryptedData = Encrypt(json);
-                Directory.CreateDirectory(Path.GetDirectoryName(_secureStoragePath)!);
-                await File.WriteAllBytesAsync(_secureStoragePath, encryptedData);
+                var encryptedData = await File.ReadAllBytesAsync(GetConfigPath(section));
+                var key = await LoadEncryptionKeyAsync();
+
+                using var aes = Aes.Create();
+                var iv = new byte[16];
+                Array.Copy(encryptedData, 0, iv, 0, 16);
+
+                var ciphertext = new byte[encryptedData.Length - 16];
+                Array.Copy(encryptedData, 16, ciphertext, 0, ciphertext.Length);
+
+                aes.Key = key;
+                aes.IV = iv;
+
+                using var decryptor = aes.CreateDecryptor();
+                using var ms = new MemoryStream(ciphertext);
+                using var cs = new CryptoStream(ms, decryptor, CryptoStreamMode.Read);
+                using var reader = new StreamReader(cs);
+
+                var json = await reader.ReadToEndAsync();
+                return JsonSerializer.Deserialize<T>(json);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error saving secure configuration values");
+                _logger.LogError(ex, "Error loading secure configuration for section {Section}", section);
+                return null;
+            }
+        }
+
+        public async Task SaveSecureConfigurationAsync<T>(string section, T configuration) where T : class
+        {
+            try
+            {
+                var json = JsonSerializer.Serialize(configuration);
+                var key = await LoadOrCreateEncryptionKeyAsync();
+
+                using var aes = Aes.Create();
+                aes.Key = key;
+                aes.GenerateIV();
+
+                using var ms = new MemoryStream();
+                await ms.WriteAsync(aes.IV, 0, aes.IV.Length);
+
+                using (var encryptor = aes.CreateEncryptor())
+                using (var cs = new CryptoStream(ms, encryptor, CryptoStreamMode.Write))
+                using (var sw = new StreamWriter(cs))
+                {
+                    await sw.WriteAsync(json);
+                }
+
+                await File.WriteAllBytesAsync(GetConfigPath(section), ms.ToArray());
+                _logger.LogInformation("Saved secure configuration for section {Section}", section);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error saving secure configuration for section {Section}", section);
                 throw;
             }
         }
 
-        public async Task<string> GetSecureValue(string key)
+        private async Task<byte[]> LoadOrCreateEncryptionKeyAsync()
         {
-            return _cache.TryGetValue(key, out var value) ? value : string.Empty;
-        }
-
-        public async Task SetSecureValue(string key, string value)
-        {
-            _cache[key] = value;
-            await SaveSecureValues();
-        }
-
-        private byte[] Encrypt(string data)
-        {
-            using var aes = Aes.Create();
-            aes.Key = _encryptionKey;
-            
-            var iv = aes.IV;
-            using var encryptor = aes.CreateEncryptor();
-            using var ms = new MemoryStream();
-            
-            // Write IV to output
-            ms.Write(iv, 0, iv.Length);
-            
-            using (var cs = new CryptoStream(ms, encryptor, CryptoStreamMode.Write))
-            using (var sw = new StreamWriter(cs))
+            if (File.Exists(_keyPath))
             {
-                sw.Write(data);
+                return await LoadEncryptionKeyAsync();
             }
 
-            return ms.ToArray();
+            var key = new byte[32];
+            using (var rng = new RNGCryptoServiceProvider())
+            {
+                rng.GetBytes(key);
+            }
+
+            await File.WriteAllBytesAsync(_keyPath, key);
+            return key;
         }
 
-        private string Decrypt(byte[] encryptedData)
+        private async Task<byte[]> LoadEncryptionKeyAsync()
         {
-            using var aes = Aes.Create();
-            aes.Key = _encryptionKey;
-            
-            // Read IV from start of data
-            var iv = new byte[aes.IV.Length];
-            Array.Copy(encryptedData, 0, iv, 0, iv.Length);
-            
-            using var decryptor = aes.CreateDecryptor(_encryptionKey, iv);
-            using var ms = new MemoryStream(encryptedData, iv.Length, encryptedData.Length - iv.Length);
-            using var cs = new CryptoStream(ms, decryptor, CryptoStreamMode.Read);
-            using var sr = new StreamReader(cs);
-            
-            return sr.ReadToEnd();
+            return await File.ReadAllBytesAsync(_keyPath);
+        }
+
+        private string GetConfigPath(string section)
+        {
+            return Path.Combine(_configPath, $"{section}.encrypted");
         }
     }
 }
