@@ -1,22 +1,21 @@
-using System;
-using CodeBuddy.Core.Implementation.Logging;
-using CodeBuddy.Core.Interfaces;
-using CodeBuddy.Core.Models.Logging;
 using Microsoft.Extensions.DependencyInjection;
+using CodeBuddy.Core.Implementation.ErrorHandling;
+using CodeBuddy.Core.Implementation.CodeValidation.Analytics;
 
 namespace CodeBuddy.Core.Extensions
 {
     public static class ServiceCollectionExtensions
     {
-        public static IServiceCollection AddCodeBuddyLogging(this IServiceCollection services, Action<LoggingConfiguration> configure = null)
+        public static IServiceCollection AddCodeBuddyCore(this IServiceCollection services)
         {
-            var config = new LoggingConfiguration();
-            configure?.Invoke(config);
-
-            services.AddSingleton(config);
-            services.AddSingleton<ILoggingService, LoggingService>();
-            services.AddSingleton<LoggingDashboard>();
-            services.AddSingleton<ErrorLoggingMiddleware>();
+            // Error handling services
+            services.AddSingleton<IPreemptiveErrorHandler, PreemptiveErrorHandler>();
+            services.AddSingleton<IErrorMonitoringDashboard, ErrorMonitoringDashboard>();
+            services.AddSingleton<IErrorAnalyticsService, ErrorAnalyticsService>();
+            
+            // Time series storage
+            services.AddSingleton<ITimeSeriesStorageOptions, TimeSeriesStorageOptions>();
+            services.AddSingleton<ITimeSeriesStorage, TimeSeriesStorage>();
 
             return services;
         }
