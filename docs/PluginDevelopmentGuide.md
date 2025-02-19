@@ -102,6 +102,67 @@ public class MyPlugin : IPlugin
 }
 ```
 
+### Configuration Recovery System
+
+The system includes an automatic configuration recovery system that helps prevent and recover from configuration-related failures:
+
+#### Features
+- Automatic configuration backups
+- Intelligent recovery from failures
+- Version-aware recovery process
+- Health monitoring integration
+
+#### Best Practices for Recovery-Aware Plugins
+
+1. Use the `[RequiresBackup]` attribute for critical settings:
+```csharp
+public class MyPluginConfiguration : BaseConfiguration
+{
+    [Required]
+    [RequiresBackup]
+    public Dictionary<string, string> CriticalSettings { get; set; }
+}
+```
+
+2. Implement graceful degradation:
+```csharp
+public class MyPlugin : IPlugin
+{
+    public async Task OnConfigurationChanged(MyPluginConfiguration config)
+    {
+        try
+        {
+            // Apply new configuration
+            await ApplyConfiguration(config);
+        }
+        catch (ConfigurationException ex)
+        {
+            // Let the recovery system handle it
+            throw;
+        }
+    }
+}
+```
+
+3. Monitor recovery metrics:
+```csharp
+public class MyPlugin : IPlugin
+{
+    public void Initialize(IPluginContext context)
+    {
+        // Subscribe to recovery events
+        context.ErrorRecoveryOrchestrator.OnRecoveryAttempted += (sender, args) =>
+        {
+            if (args.PluginId == Id)
+            {
+                // Log recovery attempt
+                _logger.LogInformation($"Configuration recovery attempted: {args.Success}");
+            }
+        };
+    }
+}
+```
+
 ### Configuration Validation Best Practices
 
 1. Always inherit from `BaseConfiguration`
@@ -112,6 +173,8 @@ public class MyPlugin : IPlugin
 6. Create migrations for breaking changes
 7. Test configuration validation
 8. Document configuration requirements
+9. Mark critical settings with `[RequiresBackup]`
+10. Implement graceful configuration failure handling
 
 ## Plugin Structure
 

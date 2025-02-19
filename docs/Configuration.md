@@ -83,6 +83,48 @@ Configurations are automatically backed up before migrations:
 - Naming format: `{ConfigName}_v{Version}_{Timestamp}.json`
 - Automatic rollback on migration failure
 
+## Configuration Auto-Recovery System
+
+The Configuration Auto-Recovery System provides automatic recovery capabilities for plugin configuration failures:
+
+### Features
+- Automatic configuration backup before changes
+- Versioned configuration snapshots
+- Intelligent rollback capabilities
+- Integration with health monitoring
+- Success/failure rate tracking
+
+### How It Works
+
+1. **Automatic Backup**
+   - Configurations are backed up before any changes
+   - Backups stored with timestamp and version information
+   - Maximum of 5 recent backups maintained
+
+2. **Recovery Process**
+   - System detects configuration failures
+   - Attempts to find latest valid backup
+   - Validates backup before restoration
+   - Applies necessary migrations during restore
+   - Monitors recovery success rate
+
+3. **Integration**
+   - Works with `PluginHealthMonitor`
+   - Extends `ConfigurationMigrationManager`
+   - Part of `ErrorRecoveryOrchestrator`
+
+### Usage
+
+The system works automatically but can be manually triggered:
+
+```csharp
+// Create backup before changes
+await configRecoveryStrategy.BackupConfigurationAsync(pluginId);
+
+// Recovery happens automatically through ErrorRecoveryOrchestrator
+// when configuration errors are detected
+```
+
 ## Configuration Health Checks
 
 The `SystemHealthDashboard` monitors configuration health:
