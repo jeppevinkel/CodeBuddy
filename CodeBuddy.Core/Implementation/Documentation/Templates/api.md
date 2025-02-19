@@ -4,43 +4,30 @@
 
 {{description}}
 
-## Type Information
-- **Assembly:** {{assembly}}
-- **Base Type:** {{baseType}}
-{{#if interfaces}}
-- **Implements:**
+## Interfaces
 {{#each interfaces}}
-  - {{this}}
+- {{this}}
 {{/each}}
-{{/if}}
 
 ## Properties
-{{#if properties}}
 | Name | Type | Description |
 |------|------|-------------|
 {{#each properties}}
 | {{name}} | {{type}} | {{description}} |
 {{/each}}
-{{else}}
-This type has no public properties.
-{{/if}}
 
 ## Methods
-{{#if methods}}
 {{#each methods}}
 ### {{name}}
+
 {{description}}
 
 #### Parameters
-{{#if parameters}}
-| Name | Type | Description |
-|------|------|-------------|
+| Name | Type | Description | Required | Default |
+|------|------|-------------|----------|---------|
 {{#each parameters}}
-| {{name}} | {{type}} | {{description}} |
+| {{name}} | {{type}} | {{description}} | {{#if isOptional}}No{{else}}Yes{{/if}} | {{defaultValue}} |
 {{/each}}
-{{else}}
-This method takes no parameters.
-{{/if}}
 
 #### Returns
 {{returnType}}
@@ -53,11 +40,4 @@ This method takes no parameters.
 ```
 {{/each}}
 {{/if}}
-
 {{/each}}
-{{else}}
-This type has no public methods.
-{{/if}}
-
-## Usage Notes
-{{usageNotes}}

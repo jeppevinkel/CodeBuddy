@@ -1,20 +1,21 @@
 using System;
 using System.Threading.Tasks;
+using CodeBuddy.Core.Interfaces;
 using CodeBuddy.Core.Models.Documentation;
 
 namespace CodeBuddy.Core.Implementation.Documentation
 {
     /// <summary>
-    /// Provides a simple API for documentation operations
+    /// Main API for documentation generation and management
     /// </summary>
     public class DocumentationAPI
     {
-        private readonly DocumentationGenerator _generator;
+        private readonly IDocumentationGenerator _generator;
         private readonly DocumentationValidator _validator;
         private readonly DocumentationVersionManager _versionManager;
-
+        
         public DocumentationAPI(
-            DocumentationGenerator generator,
+            IDocumentationGenerator generator,
             DocumentationValidator validator,
             DocumentationVersionManager versionManager)
         {
@@ -22,150 +23,125 @@ namespace CodeBuddy.Core.Implementation.Documentation
             _validator = validator;
             _versionManager = versionManager;
         }
-
+        
         /// <summary>
-        /// Generates complete documentation
+        /// Generates comprehensive documentation based on the provided options
         /// </summary>
-        public async Task<DocumentationResult> GenerateDocumentationAsync(GenerationOptions options = null)
+        public async Task<DocumentationResult> GenerateDocumentationAsync(GenerationOptions options)
         {
+            var result = new DocumentationResult();
+            
             try
             {
-                var result = new DocumentationResult();
-
                 // Generate API documentation
-                var apiDocs = await _generator.GenerateApiDocumentationAsync();
-                result.ApiDocumentation = apiDocs;
-
+                var apiResult = await _generator.GenerateApiDocumentationAsync();
+                if (!apiResult.Success)
+                {
+                    return apiResult;
+                }
+                
+                // Generate feature documentation
+                var featureResult = await _generator.GenerateFeatureDocumentationAsync();
+                if (!featureResult.Success)
+                {
+                    return featureResult;
+                }
+                
                 // Generate plugin documentation
-                if (options?.IncludePlugins != false)
+                var pluginResult = await _generator.GeneratePluginDocumentationAsync();
+                if (!pluginResult.Success)
                 {
-                    var pluginDocs = await _generator.GeneratePluginDocumentationAsync();
-                    result.PluginDocumentation = pluginDocs;
+                    return pluginResult;
                 }
-
+                
                 // Generate validation documentation
-                if (options?.IncludeValidation != false)
+                var validationResult = await _generator.GenerateValidationDocumentationAsync();
+                if (!validationResult.Success)
                 {
-                    var validationDocs = await _generator.GenerateValidationDocumentationAsync();
-                    result.ValidationDocumentation = validationDocs;
+                    return validationResult;
                 }
-
-                // Create new version
-                if (options?.CreateVersion != false)
+                
+                // Generate configuration documentation
+                var configResult = await _generator.GenerateConfigurationDocumentationAsync();
+                if (!configResult.Success)
+                {
+                    return configResult;
+                }
+                
+                // Optional: Generate TypeScript definitions
+                if (options.GenerateTypeScriptTypes)
+                {
+                    var typescriptResult = await _generator.GenerateTypeScriptDefinitionsAsync();
+                    if (!typescriptResult.Success)
+                    {
+                        return typescriptResult;
+                    }
+                }
+                
+                // Optional: Validate documentation
+                if (options.ValidateDocumentation)
+                {
+                    var validationResult = await _generator.ValidateDocumentationAsync();
+                    result.ValidationResult = validationResult;
+                    
+                    if (validationResult.Coverage < options.ValidationOptions.MinimumDocumentationCoverage)
+                    {
+                        result.Success = false;
+                        result.Error = $"Documentation coverage ({validationResult.Coverage}%) is below minimum required ({options.ValidationOptions.MinimumDocumentationCoverage}%)";
+                        return result;
+                    }
+                }
+                
+                // Optional: Create version
+                if (options.CreateVersion)
                 {
                     var version = await _versionManager.CreateVersionAsync(
-                        options?.Version ?? DateTime.UtcNow.ToString("yyyyMMdd.HHmmss"),
-                        options?.VersionDescription ?? "Documentation update");
+                        options.Version ?? DateTime.UtcNow.ToString("yyyyMMdd.HHmmss"),
+                        options.VersionDescription ?? "Generated documentation update");
                     result.Version = version;
                 }
-
-                // Validate documentation if requested
-                if (options?.ValidateDocumentation == true)
-                {
-                    result.ValidationResult = await _validator.ValidateAsync(new DocumentationSet
-                    {
-                        Types = apiDocs.Types,
-                        Examples = apiDocs.Examples,
-                        MarkdownFiles = result.GetAllMarkdownFiles(),
-                        Diagrams = result.GetAllDiagrams()
-                    });
-                }
-
+                
                 result.Success = true;
-                return result;
             }
             catch (Exception ex)
             {
-                return new DocumentationResult
-                {
-                    Success = false,
-                    Error = ex.Message
-                };
+                result.Success = false;
+                result.Error = ex.Message;
             }
+            
+            return result;
         }
-
+        
         /// <summary>
         /// Validates existing documentation
         /// </summary>
-        public async Task<ValidationResult> ValidateDocumentationAsync()
+        public async Task<DocumentationValidationResult> ValidateDocumentationAsync(ValidationOptions options)
         {
-            try
-            {
-                var docs = await LoadCurrentDocumentationAsync();
-                return await _validator.ValidateAsync(docs);
-            }
-            catch (Exception ex)
-            {
-                return new ValidationResult
-                {
-                    Success = false,
-                    Error = ex.Message
-                };
-            }
+            return await _generator.ValidateDocumentationAsync();
         }
-
+        
         /// <summary>
-        /// Gets documentation version history
+        /// Creates a new documentation version
         /// </summary>
-        public async Task<VersionHistoryResult> GetVersionHistoryAsync()
+        public async Task<DocumentationVersion> CreateVersionAsync(string version, string description)
         {
-            try
-            {
-                var versions = await _versionManager.GetVersionsAsync();
-                return new VersionHistoryResult
-                {
-                    Success = true,
-                    Versions = versions
-                };
-            }
-            catch (Exception ex)
-            {
-                return new VersionHistoryResult
-                {
-                    Success = false,
-                    Error = ex.Message
-                };
-            }
-        }
-
-        /// <summary>
-        /// Gets documentation for a specific version
-        /// </summary>
-        public async Task<DocumentationArchive> GetVersionAsync(string version)
-        {
-            return await _versionManager.GetVersionAsync(version);
-        }
-
-        /// <summary>
-        /// Gets changes between two versions
-        /// </summary>
-        public async Task<DocumentationChanges> GetVersionChangesAsync(string fromVersion, string toVersion)
-        {
-            return await _versionManager.GetChangesAsync(fromVersion, toVersion);
-        }
-
-        private async Task<DocumentationSet> LoadCurrentDocumentationAsync()
-        {
-            // Load current documentation files
-            var docs = new DocumentationSet();
-            
-            // Add implementation to load documentation files
-            // This would involve scanning the docs directory and loading all relevant files
-
-            return docs;
+            return await _versionManager.CreateVersionAsync(version, description);
         }
     }
-
-    /// <summary>
-    /// Options for documentation generation
-    /// </summary>
+    
     public class GenerationOptions
     {
-        public bool IncludePlugins { get; set; } = true;
-        public bool IncludeValidation { get; set; } = true;
-        public bool CreateVersion { get; set; } = true;
+        public bool GenerateTypeScriptTypes { get; set; } = true;
+        public bool GenerateDiagrams { get; set; } = true;
         public bool ValidateDocumentation { get; set; } = true;
+        public bool CreateVersion { get; set; } = true;
         public string Version { get; set; }
         public string VersionDescription { get; set; }
+        public ValidationOptions ValidationOptions { get; set; } = new ValidationOptions();
+    }
+    
+    public class ValidationOptions
+    {
+        public int MinimumDocumentationCoverage { get; set; } = 80;
     }
 }

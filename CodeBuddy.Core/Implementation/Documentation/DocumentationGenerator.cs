@@ -25,11 +25,15 @@ namespace CodeBuddy.Core.Implementation.Documentation
         private readonly CrossReferenceGenerator _crossRefGenerator;
         private readonly DocumentationVersionManager _versionManager;
         private readonly TemplateManager _templateManager;
+        private readonly ILoggingService _logger;
+        private readonly IConfigurationValidator _configValidator;
 
         public DocumentationGenerator(
             IConfigurationManager configManager,
             IPluginManager pluginManager,
             IFileOperations fileOps,
+            ILoggingService logger,
+            IConfigurationValidator configValidator,
             ITemplateManager templateManager = null)
         {
             _configManager = configManager;
@@ -43,6 +47,303 @@ namespace CodeBuddy.Core.Implementation.Documentation
             _crossRefGenerator = new CrossReferenceGenerator();
             _versionManager = new DocumentationVersionManager(fileOps);
             _templateManager = templateManager ?? new TemplateManager(fileOps);
+            _logger = logger;
+            _configValidator = configValidator;
+        }
+        
+        /// <summary>
+        /// Generates comprehensive documentation for features and architecture.
+        /// </summary>
+        public async Task<DocumentationResult> GenerateFeatureDocumentationAsync()
+        {
+            var result = new DocumentationResult();
+            
+            try
+            {
+                _logger.LogInformation("Generating feature documentation...");
+                
+                // Generate architecture diagrams
+                var architectureDiagram = await _diagramGenerator.GenerateArchitectureDiagramAsync();
+                var workflowDiagrams = await _diagramGenerator.GenerateWorkflowDiagramsAsync();
+                var validationPipelineDiagram = await _diagramGenerator.GenerateValidationPipelineDiagramAsync();
+                
+                await _fileOps.WriteFileAsync("docs/diagrams/architecture.puml", architectureDiagram);
+                foreach (var (name, diagram) in workflowDiagrams)
+                {
+                    await _fileOps.WriteFileAsync($"docs/diagrams/workflows/{name}.puml", diagram);
+                }
+                await _fileOps.WriteFileAsync("docs/diagrams/validation-pipeline.puml", validationPipelineDiagram);
+                
+                // Generate feature documentation
+                var features = new[]
+                {
+                    await GenerateValidationFeatureDocAsync(),
+                    await GeneratePluginSystemFeatureDocAsync(),
+                    await GenerateResourceManagementFeatureDocAsync(),
+                    await GenerateErrorHandlingFeatureDocAsync(),
+                    await GeneratePerformanceFeatureDocAsync(),
+                    await GenerateSecurityFeatureDocAsync()
+                };
+                
+                foreach (var feature in features)
+                {
+                    await _fileOps.WriteFileAsync(
+                        $"docs/features/{feature.Name.ToLower().Replace(" ", "-")}.md",
+                        feature.Content);
+                }
+                
+                // Generate user guides
+                var guides = new[]
+                {
+                    await GenerateGettingStartedGuideAsync(),
+                    await GeneratePluginDevelopmentGuideAsync(),
+                    await GenerateConfigurationGuideAsync(),
+                    await GenerateTroubleshootingGuideAsync()
+                };
+                
+                foreach (var guide in guides)
+                {
+                    await _fileOps.WriteFileAsync(
+                        $"docs/guides/{guide.Name.ToLower().Replace(" ", "-")}.md",
+                        guide.Content);
+                }
+                
+                // Generate integration documentation
+                var integrationDocs = new[]
+                {
+                    await GenerateCiCdIntegrationDocAsync(),
+                    await GenerateIdeIntegrationDocAsync(),
+                    await GenerateThirdPartyIntegrationDocAsync()
+                };
+                
+                foreach (var doc in integrationDocs)
+                {
+                    await _fileOps.WriteFileAsync(
+                        $"docs/integration/{doc.Name.ToLower().Replace(" ", "-")}.md",
+                        doc.Content);
+                }
+                
+                result.Success = true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error generating feature documentation");
+                result.Success = false;
+                result.Error = ex.Message;
+            }
+            
+            return result;
+        }
+
+        /// <summary>
+        /// Generates documentation for configuration options.
+        /// </summary>
+        public async Task<DocumentationResult> GenerateConfigurationDocumentationAsync()
+        {
+            var result = new DocumentationResult();
+            
+            try
+            {
+                _logger.LogInformation("Generating configuration documentation...");
+                
+                var configSchema = await _configValidator.GetJsonSchemaAsync();
+                var configExamples = await _configValidator.GetConfigurationExamplesAsync();
+                var validationRules = await _configValidator.GetValidationRulesAsync();
+                
+                var configDoc = new StringBuilder();
+                configDoc.AppendLine("# Configuration Guide");
+                configDoc.AppendLine();
+                configDoc.AppendLine("## Overview");
+                configDoc.AppendLine();
+                configDoc.AppendLine("This document describes the configuration options available in CodeBuddy.");
+                configDoc.AppendLine();
+                
+                // Add configuration schema
+                configDoc.AppendLine("## Configuration Schema");
+                configDoc.AppendLine();
+                configDoc.AppendLine("```json");
+                configDoc.AppendLine(configSchema);
+                configDoc.AppendLine("```");
+                configDoc.AppendLine();
+                
+                // Add examples
+                configDoc.AppendLine("## Configuration Examples");
+                configDoc.AppendLine();
+                foreach (var (name, example) in configExamples)
+                {
+                    configDoc.AppendLine($"### {name}");
+                    configDoc.AppendLine();
+                    configDoc.AppendLine("```json");
+                    configDoc.AppendLine(example);
+                    configDoc.AppendLine("```");
+                    configDoc.AppendLine();
+                }
+                
+                // Add validation rules
+                configDoc.AppendLine("## Validation Rules");
+                configDoc.AppendLine();
+                foreach (var rule in validationRules)
+                {
+                    configDoc.AppendLine($"### {rule.Name}");
+                    configDoc.AppendLine();
+                    configDoc.AppendLine(rule.Description);
+                    configDoc.AppendLine();
+                    if (rule.Examples?.Any() == true)
+                    {
+                        configDoc.AppendLine("Examples:");
+                        configDoc.AppendLine();
+                        foreach (var example in rule.Examples)
+                        {
+                            configDoc.AppendLine($"- {example}");
+                        }
+                        configDoc.AppendLine();
+                    }
+                }
+                
+                await _fileOps.WriteFileAsync("docs/configuration.md", configDoc.ToString());
+                result.Success = true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error generating configuration documentation");
+                result.Success = false;
+                result.Error = ex.Message;
+            }
+            
+            return result;
+        }
+
+        /// <summary>
+        /// Generates TypeScript type definitions from C# code.
+        /// </summary>
+        public async Task<DocumentationResult> GenerateTypeScriptDefinitionsAsync()
+        {
+            var result = new DocumentationResult();
+            
+            try
+            {
+                _logger.LogInformation("Generating TypeScript definitions...");
+                
+                var types = await GetPublicTypesAsync();
+                var typeScriptDefs = GenerateTypeScriptDefinitions(types);
+                
+                // Write main definitions file
+                await _fileOps.WriteFileAsync("docs/typescript/codebuddy.d.ts", typeScriptDefs);
+                
+                // Generate module definitions
+                var modules = types.GroupBy(t => t.Namespace?.Split('.').First());
+                foreach (var module in modules)
+                {
+                    if (string.IsNullOrEmpty(module.Key)) continue;
+                    
+                    var moduleTypes = module.ToList();
+                    var moduleDefs = GenerateTypeScriptModuleDefinitions(moduleTypes);
+                    await _fileOps.WriteFileAsync($"docs/typescript/{module.Key.ToLower()}.d.ts", moduleDefs);
+                }
+                
+                result.Success = true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error generating TypeScript definitions");
+                result.Success = false;
+                result.Error = ex.Message;
+            }
+            
+            return result;
+        }
+        
+        private async Task<FeatureDocumentation> GenerateValidationFeatureDocAsync()
+        {
+            var doc = new StringBuilder();
+            doc.AppendLine("# Validation Pipeline");
+            doc.AppendLine();
+            doc.AppendLine("## Overview");
+            doc.AppendLine();
+            doc.AppendLine("The validation pipeline is a core feature that processes code through multiple stages to perform comprehensive analysis and validation.");
+            doc.AppendLine();
+            
+            // Add component documentation
+            var components = await GetValidationComponentsAsync();
+            foreach (var component in components)
+            {
+                doc.AppendLine($"## {component.Name}");
+                doc.AppendLine();
+                doc.AppendLine(component.Description);
+                doc.AppendLine();
+                
+                if (component.Examples?.Any() == true)
+                {
+                    doc.AppendLine("### Examples");
+                    doc.AppendLine();
+                    foreach (var example in component.Examples)
+                    {
+                        doc.AppendLine($"```{example.Language}");
+                        doc.AppendLine(example.Code);
+                        doc.AppendLine("```");
+                        doc.AppendLine();
+                    }
+                }
+            }
+            
+            return new FeatureDocumentation
+            {
+                Name = "Validation Pipeline",
+                Content = doc.ToString()
+            };
+        }
+        
+        private async Task<FeatureDocumentation> GeneratePluginSystemFeatureDocAsync()
+        {
+            var doc = new StringBuilder();
+            doc.AppendLine("# Plugin System");
+            doc.AppendLine();
+            doc.AppendLine("## Overview");
+            doc.AppendLine();
+            doc.AppendLine("The plugin system allows extending CodeBuddy's functionality through custom plugins.");
+            doc.AppendLine();
+            
+            // Add plugin architecture documentation
+            doc.AppendLine("## Architecture");
+            doc.AppendLine();
+            doc.AppendLine("Plugins in CodeBuddy follow a modular architecture:");
+            doc.AppendLine();
+            doc.AppendLine("1. Each plugin is a separate assembly that implements the `IPlugin` interface");
+            doc.AppendLine("2. Plugins are loaded dynamically at runtime");
+            doc.AppendLine("3. Plugin lifecycle is managed by the `PluginManager`");
+            doc.AppendLine("4. Plugins can define their own configuration schema");
+            doc.AppendLine();
+            
+            // Add extension point documentation
+            var extensionPoints = await GetPluginExtensionPointsAsync();
+            doc.AppendLine("## Extension Points");
+            doc.AppendLine();
+            foreach (var point in extensionPoints)
+            {
+                doc.AppendLine($"### {point.Name}");
+                doc.AppendLine();
+                doc.AppendLine(point.Description);
+                doc.AppendLine();
+                
+                if (point.Examples?.Any() == true)
+                {
+                    doc.AppendLine("#### Example");
+                    doc.AppendLine();
+                    foreach (var example in point.Examples)
+                    {
+                        doc.AppendLine($"```{example.Language}");
+                        doc.AppendLine(example.Code);
+                        doc.AppendLine("```");
+                        doc.AppendLine();
+                    }
+                }
+            }
+            
+            return new FeatureDocumentation
+            {
+                Name = "Plugin System",
+                Content = doc.ToString()
+            };
         }
 
         /// <summary>

@@ -1,68 +1,40 @@
 # {{name}} Plugin
 
-**Version:** {{version}}
+Version: {{version}}
 
 {{description}}
 
-## Overview
-This document describes how to use and configure the {{name}} plugin.
-
-## Features
-{{#each features}}
+## Dependencies
+{{#each dependencies}}
 - {{this}}
 {{/each}}
 
-## Installation
-```bash
-{{installCommand}}
-```
-
 ## Configuration
 ```json
-{
-{{#each configOptions}}
-  "{{name}}": {{defaultValue}}, // {{description}}
-{{/each}}
-}
+{{{configuration}}}
 ```
 
-## Usage Examples
+## Interfaces
+{{#each interfaces}}
+### {{name}}
+
+{{description}}
+
+#### Methods
+{{#each methods}}
+##### {{name}}
+
+{{description}}
+{{/each}}
+{{/each}}
+
+## Examples
 {{#each examples}}
 ### {{title}}
+
 {{description}}
 
 ```{{language}}
 {{code}}
 ```
-{{/each}}
-
-## API Reference
-{{#each api}}
-### {{name}}
-{{description}}
-
-#### Parameters
-{{#if parameters}}
-| Name | Type | Description |
-|------|------|-------------|
-{{#each parameters}}
-| {{name}} | {{type}} | {{description}} |
-{{/each}}
-{{else}}
-No parameters required.
-{{/if}}
-
-#### Returns
-{{returnType}} - {{returnDescription}}
-{{/each}}
-
-## Troubleshooting
-{{#each troubleshooting}}
-### {{problem}}
-{{solution}}
-{{/each}}
-
-## Known Issues
-{{#each issues}}
-- {{this}}
 {{/each}}

@@ -1,10 +1,7 @@
-# {{title}}
+# {{id}}. {{title}}
 
-## Status
-{{status}}
-
-## Date
-{{date}}
+Date: {{date}}
+Status: {{status}}
 
 ## Context
 {{context}}
@@ -14,3 +11,8 @@
 
 ## Consequences
 {{consequences}}
+
+## Related
+{{#each related}}
+- [{{title}}]({{id}}-{{title-slug}}.md)
+{{/each}}
