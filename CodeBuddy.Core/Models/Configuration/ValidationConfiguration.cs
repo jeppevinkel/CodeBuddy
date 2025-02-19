@@ -5,73 +5,121 @@ using System.ComponentModel.DataAnnotations;
 namespace CodeBuddy.Core.Models.Configuration
 {
     /// <summary>
-    /// Configuration for validation rules and behaviors
+    /// Represents the configuration for validation components including monitoring settings
     /// </summary>
-    [SchemaVersion("2.0")]
-    public class ValidationConfiguration : BaseConfiguration
+    public class ValidationConfiguration
     {
         [Required]
-        [Range(1, 10)]
-        public int MaxConcurrentValidations { get; set; } = 4;
-
-        [Required]
-        [MinLength(1)]
-        public List<string> EnabledValidators { get; set; } = new();
-
-        [Required]
-        [Range(0, int.MaxValue)]
-        public int ValidationTimeoutMs { get; set; } = 30000;
-
-        [EnvironmentSpecific("Development", "Staging", "Production")]
-        public Dictionary<string, int> ResourceLimits { get; set; } = new();
-
-        [Reloadable]
-        public bool EnableDetailedLogging { get; set; }
-
-        [SensitiveData]
-        public string? ValidationApiKey { get; set; }
-
-        public ValidationCacheSettings CacheSettings { get; set; } = new();
-
-        public override ValidationResult? Validate()
-        {
-            var baseResult = base.Validate();
-            if (baseResult?.ValidationResult != ValidationResult.Success)
-            {
-                return baseResult;
-            }
-
-            // Custom validation logic
-            if (EnabledValidators.Count > MaxConcurrentValidations)
-            {
-                return new ValidationResult(
-                    "Number of enabled validators cannot exceed MaxConcurrentValidations");
-            }
-
-            // Validate resource limits
-            foreach (var limit in ResourceLimits)
-            {
-                if (limit.Value <= 0)
-                {
-                    return new ValidationResult(
-                        $"Resource limit for {limit.Key} must be greater than 0");
-                }
-            }
-
-            return ValidationResult.Success;
-        }
+        public string Name { get; set; }
+        
+        public MonitoringConfiguration Monitoring { get; set; } = new MonitoringConfiguration();
+        
+        public ValidationSettings ValidationSettings { get; set; } = new ValidationSettings();
+        
+        public AlertConfiguration AlertSettings { get; set; } = new AlertConfiguration();
     }
 
-    public class ValidationCacheSettings
+    public class MonitoringConfiguration
     {
-        [Required]
-        [Range(0, int.MaxValue)]
-        public int MaxCacheSize { get; set; } = 1000;
+        public bool EnableRealTimeMonitoring { get; set; } = true;
+        public int MetricsCollectionIntervalSeconds { get; set; } = 60;
+        public int RetentionPeriodDays { get; set; } = 30;
+        public bool EnableHistoricalTracking { get; set; } = true;
+    }
 
-        [Required]
-        [Range(1, int.MaxValue)]
-        public int CacheExpirationMinutes { get; set; } = 60;
+    public class ValidationSettings
+    {
+        public bool ValidateOnChange { get; set; } = true;
+        public bool EnforceSchemaVersion { get; set; } = true;
+        public bool AutomaticallyApplyMigrations { get; set; } = false;
+        public List<string> ExcludedValidations { get; set; } = new List<string>();
+    }
 
-        public bool EnableCache { get; set; } = true;
+    public class AlertConfiguration
+    {
+        public bool EnableAlerts { get; set; } = true;
+        public List<string> AlertChannels { get; set; } = new List<string> { "Email" };
+        public int AlertThrottleMinutes { get; set; } = 15;
+        public WarningSeverity MinimumAlertSeverity { get; set; } = WarningSeverity.Warning;
+    }
+
+    public enum WarningSeverity
+    {
+        Info = 0,
+        Warning = 1,
+        Error = 2,
+        Critical = 3
+    }
+
+    public enum WarningType
+    {
+        DeprecatedConfiguration,
+        RequiredMigration,
+        InvalidConfiguration,
+        ResourceLimitViolation,
+        SchemaVersionMismatch
+    }
+
+    public class ConfigurationWarning
+    {
+        public WarningType Type { get; set; }
+        public string Message { get; set; }
+        public WarningSeverity Severity { get; set; }
+        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+    }
+
+    public class ConfigurationHealthStatus
+    {
+        public DateTime Timestamp { get; set; }
+        public List<ValidationResult> ValidationResults { get; set; } = new List<ValidationResult>();
+        public List<SchemaVersionStatus> SchemaVersionCompliance { get; set; } = new List<SchemaVersionStatus>();
+        public MigrationStatus MigrationStatus { get; set; }
+        public Dictionary<string, PluginConfigurationState> PluginConfigurationStates { get; set; }
+    }
+
+    public class SchemaVersionStatus
+    {
+        public string ConfigurationName { get; set; }
+        public string CurrentVersion { get; set; }
+        public string ExpectedVersion { get; set; }
+        public bool IsCompliant { get; set; }
+    }
+
+    public class MigrationStatus
+    {
+        public int PendingMigrations { get; set; }
+        public DateTime LastSuccessfulMigration { get; set; }
+        public bool HasFailedMigrations { get; set; }
+        public List<MigrationHistoryEntry> RecentMigrations { get; set; } = new List<MigrationHistoryEntry>();
+    }
+
+    public class MigrationHistoryEntry
+    {
+        public string MigrationId { get; set; }
+        public DateTime AppliedAt { get; set; }
+        public bool Success { get; set; }
+        public string ErrorMessage { get; set; }
+    }
+
+    public class PluginConfigurationState
+    {
+        public bool IsConfigured { get; set; }
+        public ValidationResult ConfigurationStatus { get; set; }
+        public DateTime LastValidated { get; set; }
+    }
+
+    public class ComponentValidationStatus
+    {
+        public string ComponentName { get; set; }
+        public ValidationResult ValidationResults { get; set; }
+        public DateTime LastValidated { get; set; }
+    }
+
+    public class EnvironmentConfigurationStatus
+    {
+        public string Environment { get; set; }
+        public object ConfigurationSnapshot { get; set; }
+        public ValidationResult ValidationStatus { get; set; }
+        public DateTime LastUpdated { get; set; }
     }
 }

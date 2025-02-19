@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using CodeBuddy.Core.Interfaces;
 using CodeBuddy.Core.Models.Configuration;
+using CodeBuddy.Core.Models.Configuration;
 
 namespace CodeBuddy.Core.Implementation.Configuration
 {
@@ -14,6 +15,87 @@ namespace CodeBuddy.Core.Implementation.Configuration
     /// Manages application configuration with support for multiple sources, validation, and secure storage
     /// </summary>
     public class ConfigurationManager : IConfigurationManager
+        public ConfigurationManager(
+            IConfigurationValidator validator,
+            IConfigurationMigrationManager migrationManager,
+            ILoggingService logger)
+        {
+            _validator = validator ?? throw new ArgumentNullException(nameof(validator));
+            _migrationManager = migrationManager ?? throw new ArgumentNullException(nameof(migrationManager));
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _validationDashboard = new ConfigurationValidationDashboard(this, validator, migrationManager, null, logger);
+            public async Task<List<ConfigurationWarning>> ValidateAndMonitorConfigurationAsync()
+        {
+            var warnings = await _validationDashboard.GetConfigurationWarningsAsync();
+            
+            foreach (var warning in warnings.Where(w => w.Severity >= WarningSeverity.Error))
+            {
+                await _validationDashboard.HandleCriticalConfigurationIssueAsync(warning);
+            }
+
+            return warnings;
+        }
+
+        public async Task<ConfigurationHealthStatus> GetConfigurationHealthStatusAsync()
+        {
+            return await _validationDashboard.GetConfigurationHealthOverviewAsync();
+        }
+
+        public async Task<List<SchemaVersionStatus>> GetSchemaVersionComplianceAsync()
+        {
+            var configurations = await GetAllConfigurationsAsync();
+            var statuses = new List<SchemaVersionStatus>();
+            
+            foreach (var config in configurations)
+            {
+                var latestVersion = await GetLatestSchemaVersionAsync(config.Name);
+                statuses.Add(new SchemaVersionStatus
+                {
+                    ConfigurationName = config.Name,
+                    CurrentVersion = config.Version,
+                    ExpectedVersion = latestVersion,
+                    IsCompliant = await IsSchemaVersionCompliantAsync(config.Name, config.Version)
+                });
+            }
+
+            return statuses;
+        }
+
+        public async Task<bool> IsSchemaVersionCompliantAsync(string configName, string version)
+        {
+            // Implementation for schema version compliance check
+            return true; // TODO: Implement actual version comparison logic
+        }
+
+        public async Task<string> GetLatestSchemaVersionAsync(string configName)
+        {
+            // Implementation to get the latest schema version
+            return "1.0.0"; // TODO: Implement actual version retrieval logic
+        }
+
+        public async Task<List<object>> GetAllConfigurationsAsync()
+        {
+            // Implementation to get all configurations
+            return new List<object>(); // TODO: Implement actual configuration retrieval
+        }
+
+        public async Task<object> GetEnvironmentConfigurationAsync(string environment)
+        {
+            // Implementation to get environment-specific configuration
+            return null; // TODO: Implement actual environment configuration retrieval
+        }
+
+        public async Task<List<(string Name, string Version, DateTime RemovalDate)>> GetDeprecatedConfigurationsAsync()
+        {
+            // Implementation to get deprecated configurations
+            return new List<(string Name, string Version, DateTime RemovalDate)>();
+        }
+    }
+
+        private readonly IConfigurationValidator _validator;
+        private readonly IConfigurationMigrationManager _migrationManager;
+        private readonly ConfigurationValidationDashboard _validationDashboard;
+        private readonly ILoggingService _logger;
     {
         private readonly IConfigurationMigrationManager _migrationManager;
         private readonly IConfigurationValidator _validator;
