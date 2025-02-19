@@ -1,133 +1,52 @@
 using System;
-using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 
 namespace CodeBuddy.Core.Models.Configuration
 {
     /// <summary>
-    /// Base class for all configuration sections
+    /// Base class for all configuration classes with common validation and versioning
     /// </summary>
-    public abstract class BaseConfiguration : IValidatableObject
+    public abstract class BaseConfiguration
     {
         /// <summary>
-        /// Configuration section identifier
+        /// Configuration schema version
         /// </summary>
-        public string SectionId { get; set; }
+        [Required]
+        public Version SchemaVersion { get; set; } = new Version(1, 0);
 
         /// <summary>
         /// Last modified timestamp
         /// </summary>
-        public DateTime LastModified { get; set; }
-
-        /// <summary>
-        /// Configuration schema version
-        /// </summary>
-        public Version SchemaVersion { get; set; }
+        public DateTime LastModified { get; set; } = DateTime.UtcNow;
 
         /// <summary>
         /// Environment this configuration is for
         /// </summary>
-        public string Environment { get; set; }
+        [EnvironmentSpecific("Development", "Staging", "Production")]
+        public string? Environment { get; set; }
 
         /// <summary>
-        /// Metadata about this configuration section
+        /// Whether this configuration can be modified at runtime
         /// </summary>
-        public Dictionary<string, string> Metadata { get; set; } = new();
+        [Reloadable]
+        public bool IsReloadable { get; set; }
 
         /// <summary>
         /// Validates the configuration
         /// </summary>
-        public virtual IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
+        public virtual ValidationResult? Validate()
         {
-            var results = new List<ValidationResult>();
-
-            // Basic validation
-            if (string.IsNullOrEmpty(SectionId))
-            {
-                results.Add(new ValidationResult("SectionId is required", new[] { nameof(SectionId) }));
-            }
-
             if (SchemaVersion == null)
             {
-                results.Add(new ValidationResult("SchemaVersion is required", new[] { nameof(SchemaVersion) }));
+                return new ValidationResult("Schema version is required");
             }
 
-            return results;
-        }
-    }
-
-    /// <summary>
-    /// Base class for feature-specific configuration sections
-    /// </summary>
-    public abstract class FeatureConfiguration : BaseConfiguration
-    {
-        /// <summary>
-        /// Whether the feature is enabled
-        /// </summary>
-        public bool Enabled { get; set; }
-
-        /// <summary>
-        /// Feature-specific settings
-        /// </summary>
-        public Dictionary<string, object> Settings { get; set; } = new();
-
-        /// <summary>
-        /// Dependencies on other features
-        /// </summary>
-        public List<string> Dependencies { get; set; } = new();
-
-        public override IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
-        {
-            foreach (var result in base.Validate(validationContext))
+            if (LastModified == default)
             {
-                yield return result;
+                return new ValidationResult("Last modified timestamp is required");
             }
 
-            // Validate dependencies
-            if (Enabled && Dependencies.Count > 0)
-            {
-                // Dependency validation would be implemented here
-                // This would check if all required features are enabled
-            }
-        }
-    }
-
-    /// <summary>
-    /// Base class for plugin configuration sections
-    /// </summary>
-    public abstract class PluginConfiguration : BaseConfiguration
-    {
-        /// <summary>
-        /// Plugin identifier
-        /// </summary>
-        public string PluginId { get; set; }
-
-        /// <summary>
-        /// Plugin version
-        /// </summary>
-        public Version PluginVersion { get; set; }
-
-        /// <summary>
-        /// Plugin-specific settings
-        /// </summary>
-        public Dictionary<string, object> Settings { get; set; } = new();
-
-        public override IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
-        {
-            foreach (var result in base.Validate(validationContext))
-            {
-                yield return result;
-            }
-
-            if (string.IsNullOrEmpty(PluginId))
-            {
-                yield return new ValidationResult("PluginId is required", new[] { nameof(PluginId) });
-            }
-
-            if (PluginVersion == null)
-            {
-                yield return new ValidationResult("PluginVersion is required", new[] { nameof(PluginVersion) });
-            }
+            return ValidationResult.Success;
         }
     }
 }
