@@ -1,295 +1,130 @@
-# CodeBuddy Plugin Development Guide
+# Plugin Development Guide
 
-## Table of Contents
-- [Plugin Architecture Overview](#plugin-architecture-overview)
-- [Creating New Plugins](#creating-new-plugins)
-- [Plugin Interfaces Reference](#plugin-interfaces-reference)
-- [Configuration Management](#configuration-management)
-- [Plugin Types and Examples](#plugin-types-and-examples)
-- [Testing Guidelines](#testing-guidelines)
-- [Performance Considerations](#performance-considerations)
-- [Security Requirements](#security-requirements)
-- [Distribution and Packaging](#distribution-and-packaging)
+This guide covers the development of plugins for the CodeBuddy system.
 
-## Plugin Architecture Overview
+## Configuration Validation
 
-CodeBuddy's plugin system is built on a flexible and extensible architecture that allows developers to create various types of plugins while maintaining consistency and reliability. The core components are:
+Plugins must implement proper configuration validation to ensure reliable operation. The CodeBuddy configuration system provides several tools for this purpose.
 
-- **IPlugin**: The base interface that all plugins must implement
-- **IPluginManager**: Handles plugin lifecycle, loading, and management
-- **IPluginConfiguration**: Manages plugin-specific configuration
-- **IPluginState**: Tracks plugin state and health
-- **IPluginDependency**: Handles plugin dependencies
+### Basic Configuration Setup
 
-The plugin system follows these key principles:
-1. Loose coupling between plugins and core system
-2. Standardized configuration management
-3. Dependency injection support
-4. State management and health monitoring
-5. Resource management and cleanup
-
-## Creating New Plugins
-
-### Step 1: Create Plugin Class
 ```csharp
-public class MyCustomPlugin : IPlugin
+[SchemaVersion("1.0")]
+public class MyPluginConfiguration : BaseConfiguration
 {
-    private readonly IPluginConfiguration _configuration;
-    private IPluginState _state;
+    [Required]
+    public string PluginName { get; set; }
 
-    public MyCustomPlugin(IPluginConfiguration configuration)
+    [Range(1, 100)]
+    public int MaxThreads { get; set; } = 10;
+
+    [EnvironmentSpecific("Development", "Production")]
+    public Dictionary<string, string> Settings { get; set; } = new();
+
+    [SensitiveData]
+    public string? ApiKey { get; set; }
+
+    public override ValidationResult? Validate()
     {
-        _configuration = configuration;
-    }
+        var baseResult = base.Validate();
+        if (baseResult?.ValidationResult != ValidationResult.Success)
+        {
+            return baseResult;
+        }
 
-    public string Name => "MyCustomPlugin";
-    public string Version => "1.0.0";
-    
-    public Task InitializeAsync(IPluginState state)
+        // Custom validation logic
+        if (MaxThreads > Environment.ProcessorCount)
+        {
+            return new ValidationResult(
+                $"MaxThreads ({MaxThreads}) cannot exceed system processor count ({Environment.ProcessorCount})");
+        }
+
+        return ValidationResult.Success;
+    }
+}
+```
+
+### Configuration Migration
+
+When updating your plugin's configuration schema, implement a migration:
+
+```csharp
+public class MyPluginConfigV1ToV2Migration : IConfigurationMigration
+{
+    public string FromVersion => "1.0";
+    public string ToVersion => "2.0";
+
+    public object Migrate(object configuration)
     {
-        _state = state;
-        // Initialization logic
-        return Task.CompletedTask;
+        var v1Config = (MyPluginConfiguration)configuration;
+        
+        // Modify configuration for v2 schema
+        v1Config.MaxThreads = Math.Min(v1Config.MaxThreads, 50); // New limit in v2
+        
+        return v1Config;
     }
 
-    public Task ExecuteAsync()
+    public ValidationResult Validate(object configuration)
     {
-        // Plugin execution logic
-        return Task.CompletedTask;
+        var config = (MyPluginConfiguration)configuration;
+        
+        if (config.MaxThreads > 100)
+        {
+            return ValidationResult.Failed(
+                "Cannot migrate configurations with MaxThreads > 100");
+        }
+        
+        return ValidationResult.Success();
     }
+}
+```
 
-    public Task ShutdownAsync()
+Register the migration:
+
+```csharp
+public class MyPlugin : IPlugin
+{
+    public void Initialize(IPluginContext context)
     {
-        // Cleanup logic
-        return Task.CompletedTask;
-    }
-}
-```
-
-### Step 2: Configure Plugin
-```json
-{
-    "pluginName": "MyCustomPlugin",
-    "version": "1.0.0",
-    "settings": {
-        "customSetting1": "value1",
-        "customSetting2": "value2"
-    }
-}
-```
-
-### Step 3: Register Plugin
-```csharp
-public void ConfigureServices(IServiceCollection services)
-{
-    services.AddPlugin<MyCustomPlugin>();
-}
-```
-
-## Plugin Interfaces Reference
-
-### IPlugin
-The core interface that all plugins must implement:
-```csharp
-public interface IPlugin
-{
-    string Name { get; }
-    string Version { get; }
-    Task InitializeAsync(IPluginState state);
-    Task ExecuteAsync();
-    Task ShutdownAsync();
-}
-```
-
-### IPluginManager
-Manages plugin lifecycle:
-```csharp
-public interface IPluginManager
-{
-    Task LoadPluginAsync(string pluginPath);
-    Task UnloadPluginAsync(string pluginName);
-    IPlugin GetPlugin(string pluginName);
-    IEnumerable<IPlugin> GetAllPlugins();
-}
-```
-
-### IPluginConfiguration
-Handles plugin configuration:
-```csharp
-public interface IPluginConfiguration
-{
-    T GetSetting<T>(string key);
-    void SetSetting<T>(string key, T value);
-    bool TryGetSetting<T>(string key, out T value);
-}
-```
-
-## Configuration Management
-
-Plugins can be configured using:
-1. JSON configuration files
-2. Environment variables
-3. Code-based configuration
-4. Configuration injection
-
-Example configuration structure:
-```json
-{
-    "plugins": {
-        "MyCustomPlugin": {
-            "enabled": true,
-            "settings": {
-                "timeout": 30,
-                "retryCount": 3,
-                "customOptions": {
-                    "option1": "value1"
-                }
-            }
+        // Register configuration migration
+        context.ConfigurationManager
+            .RegisterMigration<MyPluginConfiguration>(new MyPluginConfigV1ToV2Migration());
+            
+        // Load and validate configuration
+        var config = context.ConfigurationManager
+            .LoadConfiguration<MyPluginConfiguration>();
+            
+        if (context.ConfigurationManager.RequiresMigration(config))
+        {
+            config = await context.ConfigurationManager.MigrateAsync(config);
         }
     }
 }
 ```
 
-## Plugin Types and Examples
+### Configuration Validation Best Practices
 
-### 1. Code Validators
-```csharp
-public class CustomCodeValidator : IPlugin
-{
-    public Task ExecuteAsync()
-    {
-        // Code validation logic
-    }
-}
-```
+1. Always inherit from `BaseConfiguration`
+2. Use appropriate validation attributes
+3. Implement custom validation logic
+4. Handle environment-specific settings
+5. Protect sensitive data
+6. Create migrations for breaking changes
+7. Test configuration validation
+8. Document configuration requirements
 
-### 2. Resource Monitors
-```csharp
-public class ResourceMonitorPlugin : IPlugin
-{
-    public Task ExecuteAsync()
-    {
-        // Resource monitoring logic
-    }
-}
-```
+## Plugin Structure
 
-### 3. Pattern Detectors
-```csharp
-public class PatternDetectorPlugin : IPlugin
-{
-    public Task ExecuteAsync()
-    {
-        // Pattern detection logic
-    }
-}
-```
+TBD: Add information about plugin structure, lifecycle, and dependencies
 
-### 4. Template Providers
-```csharp
-public class TemplateProviderPlugin : IPlugin
-{
-    public Task ExecuteAsync()
-    {
-        // Template provision logic
-    }
-}
-```
+## Plugin API
 
-## Testing Guidelines
+TBD: Document plugin API interfaces and usage
 
-1. **Unit Testing**
-   ```csharp
-   public class PluginTests
-   {
-       [Fact]
-       public async Task Plugin_Initialize_ShouldSetupCorrectly()
-       {
-           // Arrange
-           var plugin = new MyCustomPlugin(mockConfig);
-           
-           // Act
-           await plugin.InitializeAsync(mockState);
-           
-           // Assert
-           Assert.True(plugin.IsInitialized);
-       }
-   }
-   ```
+## Testing Plugins
 
-2. **Integration Testing**
-   - Test plugin with actual configuration
-   - Verify plugin interactions
-   - Test resource management
-   - Validate cleanup procedures
+TBD: Add plugin testing guidelines and examples
 
-3. **Performance Testing**
-   - Measure resource usage
-   - Test under load
-   - Verify memory management
-   - Check response times
+## Deployment
 
-## Performance Considerations
-
-1. **Resource Management**
-   - Implement proper disposal patterns
-   - Use async/await correctly
-   - Pool resources when appropriate
-   - Monitor memory usage
-
-2. **Optimization Tips**
-   - Cache frequently used data
-   - Minimize synchronous operations
-   - Use efficient data structures
-   - Implement lazy loading where appropriate
-
-## Security Requirements
-
-1. **Input Validation**
-   - Validate all plugin inputs
-   - Sanitize file paths
-   - Check permissions
-
-2. **Resource Access**
-   - Use principle of least privilege
-   - Implement proper authentication
-   - Secure sensitive data
-
-3. **Error Handling**
-   - Don't expose internal errors
-   - Log security events
-   - Implement proper exception handling
-
-## Distribution and Packaging
-
-1. **Package Structure**
-```
-MyPlugin/
-├── src/
-│   ├── MyPlugin.cs
-│   ├── Configuration/
-│   └── Services/
-├── tests/
-├── README.md
-├── LICENSE
-└── plugin.json
-```
-
-2. **Publishing Guidelines**
-   - Version using semantic versioning
-   - Include documentation
-   - Specify dependencies
-   - Provide sample configurations
-
-3. **Deployment**
-   - Package as NuGet package
-   - Include all dependencies
-   - Provide installation scripts
-   - Document requirements
-
-4. **Marketplace Requirements**
-   - Complete metadata
-   - Version compatibility
-   - Documentation
-   - Sample code
-   - License information
+TBD: Document plugin packaging and deployment

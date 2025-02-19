@@ -1,119 +1,77 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
 
 namespace CodeBuddy.Core.Models.Configuration
 {
     /// <summary>
-    /// Configuration for the validation system
+    /// Configuration for validation rules and behaviors
     /// </summary>
-    [ConfigurationSection("Validation", "Configuration for the validation system", version: 1)]
+    [SchemaVersion("2.0")]
     public class ValidationConfiguration : BaseConfiguration
     {
-        /// <summary>
-        /// Gets or sets the maximum number of validation errors to report
-        /// </summary>
-        [ConfigurationItem("Maximum number of validation errors to report", required: true, defaultValue: "100")]
-        [RangeValidation(1, 1000)]
-        public int MaxErrorCount { get; set; } = 100;
+        [Required]
+        [Range(1, 10)]
+        public int MaxConcurrentValidations { get; set; } = 4;
 
-        /// <summary>
-        /// Gets or sets whether to enable detailed validation messages
-        /// </summary>
-        [ConfigurationItem("Whether to enable detailed validation messages", required: true, defaultValue: "true")]
-        public bool DetailedMessages { get; set; } = true;
+        [Required]
+        [MinLength(1)]
+        public List<string> EnabledValidators { get; set; } = new();
 
-        /// <summary>
-        /// Gets or sets the validation cache size in MB
-        /// </summary>
-        [ConfigurationItem("Validation cache size in MB", required: true, defaultValue: "256")]
-        [RangeValidation(1, 1024)]
-        public int CacheSizeMB { get; set; } = 256;
+        [Required]
+        [Range(0, int.MaxValue)]
+        public int ValidationTimeoutMs { get; set; } = 30000;
 
-        /// <summary>
-        /// Gets or sets validation severity levels for different rule types
-        /// </summary>
-        [ConfigurationItem("Validation severity levels for different rule types", required: true)]
-        public Dictionary<string, ValidationSeverity> RuleSeverityLevels { get; set; } = new()
+        [EnvironmentSpecific("Development", "Staging", "Production")]
+        public Dictionary<string, int> ResourceLimits { get; set; } = new();
+
+        [Reloadable]
+        public bool EnableDetailedLogging { get; set; }
+
+        [SensitiveData]
+        public string? ValidationApiKey { get; set; }
+
+        public ValidationCacheSettings CacheSettings { get; set; } = new();
+
+        public override ValidationResult? Validate()
         {
-            { "Style", ValidationSeverity.Information },
-            { "Convention", ValidationSeverity.Warning },
-            { "Error", ValidationSeverity.Error }
-        };
-
-        /// <summary>
-        /// Gets or sets paths to exclude from validation
-        /// </summary>
-        [ConfigurationItem("Paths to exclude from validation")]
-        [PatternValidation(@"^[^<>:""\\|?*]*$", "Invalid path pattern")]
-        public List<string> ExcludePaths { get; set; } = new();
-
-        /// <summary>
-        /// Gets or sets custom validation rules
-        /// </summary>
-        [ConfigurationItem("Custom validation rules")]
-        [CustomValidation(typeof(CustomRuleValidator))]
-        public Dictionary<string, object> CustomRules { get; set; } = new();
-
-        /// <summary>
-        /// Override base validation to add custom validation logic
-        /// </summary>
-        public override IEnumerable<string> Validate()
-        {
-            var errors = new List<string>(base.Validate());
+            var baseResult = base.Validate();
+            if (baseResult?.ValidationResult != ValidationResult.Success)
+            {
+                return baseResult;
+            }
 
             // Custom validation logic
-            if (CacheSizeMB > 512 && !DetailedMessages)
+            if (EnabledValidators.Count > MaxConcurrentValidations)
             {
-                errors.Add("Large cache size requires detailed messages to be enabled");
+                return new ValidationResult(
+                    "Number of enabled validators cannot exceed MaxConcurrentValidations");
             }
 
-            if (MaxErrorCount > 500 && CacheSizeMB < 128)
+            // Validate resource limits
+            foreach (var limit in ResourceLimits)
             {
-                errors.Add("High error count requires larger cache size");
-            }
-
-            foreach (var path in ExcludePaths)
-            {
-                if (path.Length > 260)
+                if (limit.Value <= 0)
                 {
-                    errors.Add($"Path too long: {path}");
+                    return new ValidationResult(
+                        $"Resource limit for {limit.Key} must be greater than 0");
                 }
             }
 
-            return errors;
+            return ValidationResult.Success;
         }
     }
 
-    /// <summary>
-    /// Custom validator for validation rules
-    /// </summary>
-    public class CustomRuleValidator : IConfigurationValidator
+    public class ValidationCacheSettings
     {
-        public Task<ValidationResult> ValidateAsync(object value, ValidationContext context)
-        {
-            var result = new ValidationResult { IsValid = true };
+        [Required]
+        [Range(0, int.MaxValue)]
+        public int MaxCacheSize { get; set; } = 1000;
 
-            if (value is Dictionary<string, object> rules)
-            {
-                foreach (var (key, rule) in rules)
-                {
-                    if (string.IsNullOrWhiteSpace(key))
-                    {
-                        result.IsValid = false;
-                        result.Errors.Add("Rule key cannot be empty");
-                        result.Severity = ValidationSeverity.Error;
-                    }
+        [Required]
+        [Range(1, int.MaxValue)]
+        public int CacheExpirationMinutes { get; set; } = 60;
 
-                    if (rule == null)
-                    {
-                        result.IsValid = false;
-                        result.Errors.Add($"Rule '{key}' cannot be null");
-                        result.Severity = ValidationSeverity.Error;
-                    }
-                }
-            }
-
-            return Task.FromResult(result);
-        }
+        public bool EnableCache { get; set; } = true;
     }
 }

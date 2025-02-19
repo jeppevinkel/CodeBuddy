@@ -1,242 +1,195 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
-using System.Text.Json;
 using CodeBuddy.Core.Models.Configuration;
-using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
 
 namespace CodeBuddy.Core.Implementation.Configuration
 {
     /// <summary>
-    /// Manages configuration schema migrations and version upgrades
+    /// Manages configuration migrations between different schema versions
     /// </summary>
     public class ConfigurationMigrationManager : IConfigurationMigrationManager
     {
-        private readonly ILogger _logger;
-        private readonly string _migrationsPath;
-        private readonly List<MigrationRecord> _migrationHistory = new();
+        private readonly string _backupPath;
+        private readonly Dictionary<Type, List<IConfigurationMigration>> _migrations;
+        private readonly List<MigrationRecord> _migrationHistory;
 
-        public ConfigurationMigrationManager(ILogger logger)
+        public ConfigurationMigrationManager(string backupPath = "config/backups")
         {
-            _logger = logger;
-            _migrationsPath = Path.Combine(AppContext.BaseDirectory, "config_migrations");
-            LoadMigrationHistory();
+            _backupPath = backupPath;
+            _migrations = new Dictionary<Type, List<IConfigurationMigration>>();
+            _migrationHistory = new List<MigrationRecord>();
+
+            // Ensure backup directory exists
+            Directory.CreateDirectory(_backupPath);
         }
 
-        public bool NeedsMigration(string section, object configuration)
+        /// <summary>
+        /// Registers a migration for a specific configuration type
+        /// </summary>
+        public void RegisterMigration<TConfig>(IConfigurationMigration migration)
         {
-            var configType = configuration.GetType();
-            var currentVersion = GetCurrentVersion(configType);
-            var requiredVersion = GetRequiredVersion(configType);
+            var configType = typeof(TConfig);
+            if (!_migrations.ContainsKey(configType))
+            {
+                _migrations[configType] = new List<IConfigurationMigration>();
+            }
 
-            return currentVersion < requiredVersion;
+            _migrations[configType].Add(migration);
+            // Sort migrations by version to ensure correct order
+            _migrations[configType].Sort((a, b) => 
+                Version.Parse(a.FromVersion).CompareTo(Version.Parse(b.FromVersion)));
         }
 
-        public async Task<MigrationResult> MigrateConfiguration(string section, object configuration)
+        /// <summary>
+        /// Checks if migration is needed for the given configuration
+        /// </summary>
+        public bool RequiresMigration<T>(T configuration) where T : BaseConfiguration
         {
+            var configType = typeof(T);
+            if (!_migrations.ContainsKey(configType))
+            {
+                return false;
+            }
+
+            var currentVersion = configuration.SchemaVersion;
+            var latestVersion = GetLatestVersion(configType);
+
+            return currentVersion < latestVersion;
+        }
+
+        /// <summary>
+        /// Migrates configuration to the latest version
+        /// </summary>
+        public async Task<T> MigrateAsync<T>(T configuration) where T : BaseConfiguration
+        {
+            var configType = typeof(T);
+            if (!_migrations.ContainsKey(configType))
+            {
+                return configuration;
+            }
+
+            var currentVersion = configuration.SchemaVersion;
+            var backupPath = await CreateBackupAsync(configuration);
+
             try
             {
-                var configType = configuration.GetType();
-                var currentVersion = GetCurrentVersion(configType);
-                var targetVersion = GetRequiredVersion(configType);
-
-                if (currentVersion >= targetVersion)
-                {
-                    return MigrationResult.Success(configuration);
-                }
-
-                _logger.LogInformation(
-                    "Starting configuration migration for section {Section} from v{Current} to v{Target}",
-                    section, currentVersion, targetVersion);
-
-                // Create backup
-                var backupPath = await CreateBackup(section, configuration);
-
-                // Get migration path
-                var migrations = GetMigrationPath(configType, currentVersion, targetVersion);
-                var migratedConfig = configuration;
+                var migrations = GetRequiredMigrations(configType, currentVersion);
+                var result = configuration;
 
                 foreach (var migration in migrations)
                 {
-                    try
+                    // Validate before migration
+                    var validationResult = migration.Validate(result);
+                    if (!validationResult.IsValid)
                     {
-                        _logger.LogDebug(
-                            "Applying migration {From} -> {To} for section {Section}",
-                            migration.FromVersion, migration.ToVersion, section);
-
-                        migratedConfig = migration.Migrate(migratedConfig);
-                        
-                        var validationResult = migration.Validate(migratedConfig);
-                        if (!validationResult.IsValid)
-                        {
-                            throw new ValidationException(
-                                $"Migration validation failed: {string.Join(", ", validationResult.Errors)}");
-                        }
-
-                        // Record successful migration
-                        _migrationHistory.Add(new MigrationRecord
-                        {
-                            ConfigSection = section,
-                            FromVersion = migration.FromVersion,
-                            ToVersion = migration.ToVersion,
-                            MigrationDate = DateTime.UtcNow,
-                            Success = true,
-                            BackupPath = backupPath
-                        });
+                        throw new ConfigurationMigrationException(
+                            $"Validation failed for migration from {migration.FromVersion} to {migration.ToVersion}: " +
+                            string.Join(", ", validationResult.Errors));
                     }
-                    catch (Exception ex)
+
+                    // Perform migration
+                    result = (T)migration.Migrate(result);
+                    result.SchemaVersion = Version.Parse(migration.ToVersion);
+                    result.LastModified = DateTime.UtcNow;
+
+                    // Record successful migration
+                    _migrationHistory.Add(new MigrationRecord
                     {
-                        _logger.LogError(ex,
-                            "Error during migration {From} -> {To} for section {Section}",
-                            migration.FromVersion, migration.ToVersion, section);
-
-                        // Record failed migration
-                        _migrationHistory.Add(new MigrationRecord
-                        {
-                            ConfigSection = section,
-                            FromVersion = migration.FromVersion,
-                            ToVersion = migration.ToVersion,
-                            MigrationDate = DateTime.UtcNow,
-                            Success = false,
-                            BackupPath = backupPath,
-                            Description = ex.Message
-                        });
-
-                        return MigrationResult.Failed(ex.Message);
-                    }
+                        ConfigSection = configType.Name,
+                        FromVersion = migration.FromVersion,
+                        ToVersion = migration.ToVersion,
+                        MigrationDate = DateTime.UtcNow,
+                        Success = true,
+                        BackupPath = backupPath,
+                        Description = $"Migrated {configType.Name} from v{migration.FromVersion} to v{migration.ToVersion}"
+                    });
                 }
 
-                await SaveMigrationHistory();
-                return MigrationResult.Success(migratedConfig);
+                return result;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error during configuration migration for section {Section}", section);
-                return MigrationResult.Failed(ex.Message);
+                // Record failed migration
+                _migrationHistory.Add(new MigrationRecord
+                {
+                    ConfigSection = configType.Name,
+                    FromVersion = currentVersion.ToString(),
+                    ToVersion = GetLatestVersion(configType).ToString(),
+                    MigrationDate = DateTime.UtcNow,
+                    Success = false,
+                    BackupPath = backupPath,
+                    Description = $"Migration failed: {ex.Message}"
+                });
+
+                // Restore from backup
+                await RestoreFromBackupAsync<T>(backupPath);
+                throw;
             }
         }
 
-        private async Task<string> CreateBackup(string section, object configuration)
+        /// <summary>
+        /// Gets the migration history for a configuration type
+        /// </summary>
+        public IEnumerable<MigrationRecord> GetMigrationHistory<T>() where T : BaseConfiguration
         {
-            var backupDir = Path.Combine(_migrationsPath, "backups");
-            Directory.CreateDirectory(backupDir);
+            var configType = typeof(T).Name;
+            return _migrationHistory
+                .Where(m => m.ConfigSection == configType)
+                .OrderByDescending(m => m.MigrationDate);
+        }
 
-            var backupPath = Path.Combine(backupDir, 
-                $"{section}_{DateTime.UtcNow:yyyyMMddHHmmss}.json");
-
-            var json = JsonSerializer.Serialize(configuration, new JsonSerializerOptions
+        private Version GetLatestVersion(Type configType)
+        {
+            if (!_migrations.ContainsKey(configType))
             {
-                WriteIndented = true
-            });
+                return new Version(1, 0);
+            }
 
+            var lastMigration = _migrations[configType].Last();
+            return Version.Parse(lastMigration.ToVersion);
+        }
+
+        private List<IConfigurationMigration> GetRequiredMigrations(Type configType, Version currentVersion)
+        {
+            return _migrations[configType]
+                .Where(m => Version.Parse(m.FromVersion) >= currentVersion 
+                           && Version.Parse(m.ToVersion) > currentVersion)
+                .OrderBy(m => Version.Parse(m.FromVersion))
+                .ToList();
+        }
+
+        private async Task<string> CreateBackupAsync<T>(T configuration) where T : BaseConfiguration
+        {
+            var timestamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+            var backupFileName = $"{typeof(T).Name}_v{configuration.SchemaVersion}_{timestamp}.json";
+            var backupPath = Path.Combine(_backupPath, backupFileName);
+
+            var json = JsonConvert.SerializeObject(configuration, Formatting.Indented);
             await File.WriteAllTextAsync(backupPath, json);
+
             return backupPath;
         }
 
-        private void LoadMigrationHistory()
+        private async Task<T> RestoreFromBackupAsync<T>(string backupPath) where T : BaseConfiguration
         {
-            var historyPath = Path.Combine(_migrationsPath, "migration_history.json");
-            if (File.Exists(historyPath))
+            if (!File.Exists(backupPath))
             {
-                try
-                {
-                    var json = File.ReadAllText(historyPath);
-                    var history = JsonSerializer.Deserialize<List<MigrationRecord>>(json);
-                    if (history != null)
-                    {
-                        _migrationHistory.AddRange(history);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error loading migration history");
-                }
-            }
-        }
-
-        private async Task SaveMigrationHistory()
-        {
-            var historyPath = Path.Combine(_migrationsPath, "migration_history.json");
-            Directory.CreateDirectory(_migrationsPath);
-
-            var json = JsonSerializer.Serialize(_migrationHistory, new JsonSerializerOptions
-            {
-                WriteIndented = true
-            });
-
-            await File.WriteAllTextAsync(historyPath, json);
-        }
-
-        private static Version GetCurrentVersion(Type configType)
-        {
-            var versionAttr = configType.GetCustomAttribute<SchemaVersionAttribute>();
-            return versionAttr?.Version ?? new Version(1, 0);
-        }
-
-        private static Version GetRequiredVersion(Type configType)
-        {
-            var migrationAttr = configType.GetCustomAttribute<RequiresMigrationAttribute>();
-            if (migrationAttr != null)
-            {
-                var migration = (IConfigurationMigration)Activator.CreateInstance(migrationAttr.MigratorType)!;
-                return Version.Parse(migration.ToVersion);
-            }
-            return new Version(1, 0);
-        }
-
-        private static IConfigurationMigration[] GetMigrationPath(Type configType, Version from, Version to)
-        {
-            var migrations = new List<IConfigurationMigration>();
-            var current = from;
-
-            while (current < to)
-            {
-                var nextMigration = FindNextMigration(configType, current);
-                if (nextMigration == null)
-                {
-                    throw new InvalidOperationException(
-                        $"No migration path found from v{current} to v{to}");
-                }
-
-                migrations.Add(nextMigration);
-                current = Version.Parse(nextMigration.ToVersion);
+                throw new FileNotFoundException("Backup file not found", backupPath);
             }
 
-            return migrations.ToArray();
-        }
-
-        private static IConfigurationMigration? FindNextMigration(Type configType, Version current)
-        {
-            var migrationAttr = configType.GetCustomAttribute<RequiresMigrationAttribute>();
-            if (migrationAttr == null) return null;
-
-            var migration = (IConfigurationMigration)Activator.CreateInstance(migrationAttr.MigratorType)!;
-            if (Version.Parse(migration.FromVersion) == current)
-            {
-                return migration;
-            }
-
-            return null;
+            var json = await File.ReadAllTextAsync(backupPath);
+            return JsonConvert.DeserializeObject<T>(json) 
+                   ?? throw new InvalidOperationException("Failed to restore configuration from backup");
         }
     }
 
-    public class MigrationResult
+    public class ConfigurationMigrationException : Exception
     {
-        public bool Success { get; set; }
-        public string? Error { get; set; }
-        public object? Configuration { get; set; }
-
-        public static MigrationResult Success(object configuration) => new()
-        {
-            Success = true,
-            Configuration = configuration
-        };
-
-        public static MigrationResult Failed(string error) => new()
-        {
-            Success = false,
-            Error = error
-        };
+        public ConfigurationMigrationException(string message) : base(message) { }
+        public ConfigurationMigrationException(string message, Exception inner) : base(message, inner) { }
     }
 }
