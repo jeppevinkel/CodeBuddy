@@ -1,68 +1,104 @@
-# {{name}} Plugin
+# {{Name}} Plugin
 
-**Version:** {{version}}
-
-{{description}}
+**Version:** {{Version}}
+**Author:** {{Author}}
+**License:** {{License}}
 
 ## Overview
-This document describes how to use and configure the {{name}} plugin.
+
+{{Description}}
 
 ## Features
-{{#each features}}
-- {{this}}
-{{/each}}
+
+{{#Features}}
+- {{.}}
+{{/Features}}
 
 ## Installation
+
+1. Add the plugin package:
 ```bash
-{{installCommand}}
+dotnet add package {{PackageName}}
+```
+
+2. Register the plugin in your application:
+```csharp
+{{RegistrationExample}}
 ```
 
 ## Configuration
+
 ```json
 {
-{{#each configOptions}}
-  "{{name}}": {{defaultValue}}, // {{description}}
-{{/each}}
+    {{ConfigurationExample}}
 }
 ```
 
 ## Usage Examples
-{{#each examples}}
-### {{title}}
-{{description}}
 
-```{{language}}
-{{code}}
+{{#Examples}}
+### {{Title}}
+
+{{Description}}
+
+```csharp
+{{Code}}
 ```
-{{/each}}
+
+{{/Examples}}
 
 ## API Reference
-{{#each api}}
-### {{name}}
-{{description}}
 
-#### Parameters
-{{#if parameters}}
-| Name | Type | Description |
-|------|------|-------------|
-{{#each parameters}}
-| {{name}} | {{type}} | {{description}} |
-{{/each}}
-{{else}}
-No parameters required.
-{{/if}}
+### Interfaces
 
-#### Returns
-{{returnType}} - {{returnDescription}}
-{{/each}}
+{{#Interfaces}}
+#### {{Name}}
+
+{{Description}}
+
+**Methods:**
+{{#Methods}}
+- `{{Name}}`: {{Description}}
+{{/Methods}}
+
+{{/Interfaces}}
+
+### Events
+
+{{#Events}}
+#### {{Name}}
+
+{{Description}}
+
+**Event Args:** {{EventArgsType}}
+
+{{/Events}}
+
+## Dependencies
+
+{{#Dependencies}}
+- {{Name}} ({{Version}})
+{{/Dependencies}}
+
+## Best Practices
+
+{{#BestPractices}}
+- {{.}}
+{{/BestPractices}}
 
 ## Troubleshooting
-{{#each troubleshooting}}
-### {{problem}}
-{{solution}}
-{{/each}}
 
-## Known Issues
-{{#each issues}}
-- {{this}}
-{{/each}}
+{{#TroubleshootingItems}}
+### {{Problem}}
+
+{{Solution}}
+
+{{/TroubleshootingItems}}
+
+## Contributing
+
+{{ContributingGuidelines}}
+
+## License
+
+{{LicenseText}}

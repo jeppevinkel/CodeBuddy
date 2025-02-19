@@ -514,15 +514,26 @@ namespace CodeBuddy.Core.Implementation.Documentation
 
         private async Task GenerateMarkdownFiles(DocumentationResult result)
         {
-            // Create version for new documentation
-            var version = await _versionManager.CreateVersionAsync(
-                result.Version ?? DateTime.UtcNow.ToString("yyyyMMdd.HHmmss"),
-                "Generated documentation update");
+            try
+            {
+                // Create version for new documentation
+                var version = await _versionManager.CreateVersionAsync(
+                    result.Version ?? DateTime.UtcNow.ToString("yyyyMMdd.HHmmss"),
+                    "Generated documentation update");
 
-            // Generate main documentation files
-            await _fileOps.WriteFileAsync("docs/README.md", await GenerateMainReadmeAsync(result));
-            await _fileOps.WriteFileAsync("docs/ARCHITECTURE.md", await GenerateArchitectureDocAsync(result));
-            await _fileOps.WriteFileAsync("docs/CONTRIBUTING.md", await GenerateContributingGuideAsync());
+                // Ensure base directories exist
+                await _fileOps.EnsureDirectoryExistsAsync("docs");
+                await _fileOps.EnsureDirectoryExistsAsync("docs/api");
+                await _fileOps.EnsureDirectoryExistsAsync("docs/concepts");
+                await _fileOps.EnsureDirectoryExistsAsync("docs/adr");
+                await _fileOps.EnsureDirectoryExistsAsync("docs/plugins");
+                await _fileOps.EnsureDirectoryExistsAsync("docs/validation");
+                await _fileOps.EnsureDirectoryExistsAsync("docs/typescript");
+
+                // Generate main documentation files
+                await _fileOps.WriteFileAsync("docs/README.md", await GenerateMainReadmeAsync(result));
+                await _fileOps.WriteFileAsync("docs/ARCHITECTURE.md", await GenerateArchitectureDocAsync(result));
+                await _fileOps.WriteFileAsync("docs/CONTRIBUTING.md", await GenerateContributingGuideAsync());
 
             // Generate API documentation
             await _fileOps.WriteFileAsync("docs/api/overview.md", GenerateApiOverviewMarkdown(result));
@@ -599,14 +610,17 @@ namespace CodeBuddy.Core.Implementation.Documentation
             // Index API types
             foreach (var type in result.Types)
             {
-                // Index type
+                // Index type with enhanced metadata
                 searchIndex.Add(new SearchIndexEntry
                 {
                     Title = type.Name,
                     Path = $"api/{type.Namespace?.Replace(".", "/")}/{type.Name}.md",
                     Content = type.Description,
                     Category = "API",
-                    Type = "Type"
+                    Type = "Type",
+                    Tags = GetTypeMetadataTags(type),
+                    LastUpdated = DateTime.UtcNow,
+                    Language = "csharp"
                 });
                 
                 // Index methods
@@ -1424,6 +1438,8 @@ namespace CodeBuddy.Core.Implementation.Documentation
                 "bool" => "boolean",
                 "void" => "void",
                 "object" => "any",
+                "DateTime" => "Date",
+                "Guid" => "string",
                 "Task" => "Promise<void>",
                 var t when t.StartsWith("Task<") => $"Promise<{MapCSharpTypeToTypeScript(t[5..^1])}>",
                 var t when t.StartsWith("List<") => $"Array<{MapCSharpTypeToTypeScript(t[5..^1])}>",
@@ -1431,8 +1447,51 @@ namespace CodeBuddy.Core.Implementation.Documentation
                 var t when t.StartsWith("IEnumerable<") => $"Array<{MapCSharpTypeToTypeScript(t[12..^1])}>",
                 var t when t.StartsWith("Dictionary<") => "{ [key: string]: any }",
                 var t when t.StartsWith("IDictionary<") => "{ [key: string]: any }",
+                var t when t.StartsWith("Action<") => $"({MapCSharpTypeToTypeScript(t[7..^1])}) => void",
+                var t when t.StartsWith("Func<") => 
+                    t.Contains(",") ? 
+                        $"({MapCSharpTypeToTypeScript(t[5..t.LastIndexOf(',')])}) => {MapCSharpTypeToTypeScript(t[(t.LastIndexOf(',')+1)..^1])}" :
+                        $"() => {MapCSharpTypeToTypeScript(t[5..^1])}",
+                var t when t.StartsWith("Nullable<") => MapCSharpTypeToTypeScript(t[9..^1]) + " | null",
+                var t when t.Contains("[]") => $"Array<{MapCSharpTypeToTypeScript(t[..^2])}>",
                 _ => csharpType
             };
+        }
+
+        private List<string> GetTypeMetadataTags(TypeDocumentation type)
+        {
+            var tags = new List<string>();
+
+            // Add namespace-based tags
+            if (!string.IsNullOrEmpty(type.Namespace))
+            {
+                tags.AddRange(type.Namespace.Split('.'));
+            }
+
+            // Add interface-based tags
+            if (type.Interfaces?.Any() == true)
+            {
+                tags.AddRange(type.Interfaces.Select(i => i.Replace("I", "")));
+            }
+
+            // Add common category tags
+            if (type.Name.EndsWith("Controller")) tags.Add("controller");
+            if (type.Name.EndsWith("Service")) tags.Add("service");
+            if (type.Name.EndsWith("Repository")) tags.Add("repository");
+            if (type.Name.EndsWith("Manager")) tags.Add("manager");
+            if (type.Name.EndsWith("Factory")) tags.Add("factory");
+            if (type.Name.EndsWith("Provider")) tags.Add("provider");
+            if (type.Name.EndsWith("Handler")) tags.Add("handler");
+            if (type.Name.Contains("Base")) tags.Add("base-class");
+            if (type.Name.StartsWith("I")) tags.Add("interface");
+
+            // Add functionality tags
+            if (type.Methods?.Any(m => m.Name.Contains("Async")) == true) tags.Add("async");
+            if (type.Properties?.Any(p => p.Type.Contains("ILogger")) == true) tags.Add("logging");
+            if (type.Properties?.Any(p => p.Type.Contains("Config")) == true) tags.Add("configuration");
+            if (type.Properties?.Any(p => p.Type.Contains("Cache")) == true) tags.Add("caching");
+
+            return tags.Distinct().ToList();
         }
     }
 }

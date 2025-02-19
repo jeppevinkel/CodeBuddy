@@ -1,63 +1,79 @@
-# {{name}}
+# {{Name}}
 
-**Namespace:** {{namespace}}
+**Namespace:** {{Namespace}}
 
-{{description}}
+{{Description}}
 
-## Type Information
-- **Assembly:** {{assembly}}
-- **Base Type:** {{baseType}}
-{{#if interfaces}}
-- **Implements:**
-{{#each interfaces}}
-  - {{this}}
-{{/each}}
-{{/if}}
+## Overview
 
-## Properties
-{{#if properties}}
-| Name | Type | Description |
-|------|------|-------------|
-{{#each properties}}
-| {{name}} | {{type}} | {{description}} |
-{{/each}}
-{{else}}
-This type has no public properties.
-{{/if}}
+{{Overview}}
 
-## Methods
-{{#if methods}}
-{{#each methods}}
-### {{name}}
-{{description}}
+## Installation
 
-#### Parameters
-{{#if parameters}}
-| Name | Type | Description |
-|------|------|-------------|
-{{#each parameters}}
-| {{name}} | {{type}} | {{description}} |
-{{/each}}
-{{else}}
-This method takes no parameters.
-{{/if}}
-
-#### Returns
-{{returnType}}
-
-{{#if examples}}
-#### Examples
-{{#each examples}}
-```{{language}}
-{{code}}
+```bash
+dotnet add package {{PackageName}}
 ```
-{{/each}}
-{{/if}}
 
-{{/each}}
-{{else}}
-This type has no public methods.
-{{/if}}
+## Usage
 
-## Usage Notes
-{{usageNotes}}
+```csharp
+{{UsageExample}}
+```
+
+## API Reference
+
+### Properties
+
+| Name | Type | Description |
+|------|------|-------------|
+{{#Properties}}
+| {{Name}} | {{Type}} | {{Description}} |
+{{/Properties}}
+
+### Methods
+
+{{#Methods}}
+#### {{Name}}
+
+{{Description}}
+
+**Parameters:**
+{{#Parameters}}
+- `{{Name}}` ({{Type}}): {{Description}}
+{{/Parameters}}
+
+**Returns:** {{ReturnType}}
+
+**Example:**
+```csharp
+{{Example}}
+```
+
+{{/Methods}}
+
+## Configuration
+
+```json
+{
+    {{ConfigurationExample}}
+}
+```
+
+## Examples
+
+{{#Examples}}
+### {{Title}}
+
+{{Description}}
+
+```csharp
+{{Code}}
+```
+
+{{/Examples}}
+
+## See Also
+
+{{#SeeAlso}}
+- [{{Text}}]({{Link}})
+{{/SeeAlso}}
