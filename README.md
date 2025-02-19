@@ -93,6 +93,10 @@ CodeBuddy is built using .NET Core 8 and aims to provide a suite of tools that a
 - [ ] Testing and stability
 - [ ] Community feedback implementation
 
+## Tests
+
+Tests are outside the scope of this project.
+
 ## Contributing
 
 This project is in its early stages and welcomes contributions. More detailed contribution guidelines will be added as the project progresses.
