@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
-using CodeBuddy.Core.Implementation.ErrorHandling;
-using CodeBuddy.Core.Implementation.CodeValidation.Analytics;
+using CodeBuddy.Core.Interfaces;
+using CodeBuddy.Core.Implementation;
+using CodeBuddy.Core.Implementation.Configuration;
 
 namespace CodeBuddy.Core.Extensions
 {
@@ -8,15 +9,12 @@ namespace CodeBuddy.Core.Extensions
     {
         public static IServiceCollection AddCodeBuddyCore(this IServiceCollection services)
         {
-            // Error handling services
-            services.AddSingleton<IPreemptiveErrorHandler, PreemptiveErrorHandler>();
-            services.AddSingleton<IErrorMonitoringDashboard, ErrorMonitoringDashboard>();
-            services.AddSingleton<IErrorAnalyticsService, ErrorAnalyticsService>();
+            services.AddScoped<IConfigurationManager, ConfigurationManager>();
+            services.AddScoped<IConfigurationValidator, ConfigurationValidator>();
+            services.AddScoped<IConfigurationDashboard, ConfigurationDashboard>();
+            services.AddScoped<IConfigurationMigrationManager, ConfigurationMigrationManager>();
+            services.AddScoped<ILoggingService, LoggingService>();
             
-            // Time series storage
-            services.AddSingleton<ITimeSeriesStorageOptions, TimeSeriesStorageOptions>();
-            services.AddSingleton<ITimeSeriesStorage, TimeSeriesStorage>();
-
             return services;
         }
     }
