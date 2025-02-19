@@ -37,6 +37,7 @@ public class ConfigurationManager : IConfigurationManager
         _configPath = configPath;
         _migrationManager = new ConfigurationMigrationManager(logger);
         _validationManager = new ConfigurationValidationManager(serviceProvider);
+        _secureStorage = new SecureConfigurationStorage(logger);
         
         _jsonOptions = new JsonSerializerOptions
         {
@@ -47,7 +48,20 @@ public class ConfigurationManager : IConfigurationManager
 
         // Initialize health check timer (runs every 5 minutes)
         _healthCheckTimer = new System.Threading.Timer(RunHealthCheck, null, TimeSpan.Zero, TimeSpan.FromMinutes(5));
+
+        // Initialize file watcher for hot reload
+        var configDir = Path.GetDirectoryName(_configPath) ?? ".";
+        _configWatcher = new FileSystemWatcher(configDir, "*.json")
+        {
+            NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.CreationTime,
+            EnableRaisingEvents = true
+        };
+        _configWatcher.Changed += HandleConfigurationFileChange;
     }
+
+    private readonly Dictionary<string, List<Delegate>> _changeCallbacks = new();
+    private readonly SecureConfigurationStorage _secureStorage;
+    private readonly FileSystemWatcher _configWatcher;
 
     /// <summary>
     /// Gets configuration for a specific section with validation, caching, and migration
@@ -129,6 +143,49 @@ public class ConfigurationManager : IConfigurationManager
     /// <summary>
     /// Saves configuration with validation, schema checks, and versioning
     /// </summary>
+    public async Task<T> GetConfiguration<T>(string section, string environment) where T : class, new()
+    {
+        var baseConfig = await GetConfiguration<T>(section);
+        
+        if (!string.IsNullOrEmpty(environment))
+        {
+            var overridePath = $"{Path.GetDirectoryName(_configPath)}/config.{environment}.json";
+            if (File.Exists(overridePath))
+            {
+                try
+                {
+                    var overrideJson = await File.ReadAllTextAsync(overridePath);
+                    var overrides = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(overrideJson, _jsonOptions);
+                    
+                    if (overrides?.TryGetValue(section, out var overrideElement) == true)
+                    {
+                        var overrideConfig = overrideElement.Deserialize<T>(_jsonOptions);
+                        if (overrideConfig != null)
+                        {
+                            foreach (var prop in typeof(T).GetProperties())
+                            {
+                                var overrideValue = prop.GetValue(overrideConfig);
+                                if (overrideValue != null)
+                                {
+                                    prop.SetValue(baseConfig, overrideValue);
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Error loading environment configuration overrides from {Environment}", environment);
+                }
+            }
+        }
+
+        // Apply command line overrides
+        ApplyCommandLineOverrides(baseConfig);
+
+        return baseConfig;
+    }
+
     public async Task SaveConfiguration<T>(string section, T configuration) where T : class
     {
         try
@@ -204,6 +261,193 @@ public class ConfigurationManager : IConfigurationManager
         {
             _logger.LogError(ex, "Error saving configuration for section {Section}", section);
             throw;
+        }
+    }
+
+    public IEnumerable<ValidationResult> ValidateConfiguration<T>(T configuration) where T : class
+    {
+        var validationResults = new List<ValidationResult>();
+        var validationContext = new ValidationContext(configuration);
+        Validator.TryValidateObject(configuration, validationContext, validationResults, true);
+        return validationResults;
+    }
+
+    public void RegisterChangeCallback<T>(string section, Action<T> callback) where T : class
+    {
+        if (!_changeCallbacks.ContainsKey(section))
+        {
+            _changeCallbacks[section] = new List<Delegate>();
+        }
+        _changeCallbacks[section].Add(callback);
+    }
+
+    public async Task<string> GetSecureValue(string section, string key)
+    {
+        return await _secureStorage.GetSecureValue($"{section}:{key}");
+    }
+
+    public async Task SetSecureValue(string section, string key, string value)
+    {
+        await _secureStorage.SetSecureValue($"{section}:{key}", value);
+    }
+
+    public async Task BackupConfiguration(string backupPath)
+    {
+        if (File.Exists(_configPath))
+        {
+            await File.CopyAsync(_configPath, backupPath);
+            _logger.LogInformation("Configuration backed up to {BackupPath}", backupPath);
+        }
+    }
+
+    public async Task RestoreConfiguration(string backupPath)
+    {
+        if (File.Exists(backupPath))
+        {
+            await File.CopyAsync(backupPath, _configPath, true);
+            _logger.LogInformation("Configuration restored from {BackupPath}", backupPath);
+            
+            // Clear cache and notify subscribers
+            _cache.Clear();
+            foreach (var section in _changeCallbacks.Keys)
+            {
+                await NotifyConfigurationChanged(section);
+            }
+        }
+    }
+
+    public async Task<IDictionary<string, string>> GetConfigurationMetadata(string section)
+    {
+        var metadata = new Dictionary<string, string>
+        {
+            ["SchemaVersion"] = GetConfigurationVersion(section),
+            ["LastModified"] = File.GetLastWriteTime(_configPath).ToString("O"),
+            ["Environment"] = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"
+        };
+
+        return metadata;
+    }
+
+    public async Task<string> GenerateConfigurationDocumentation()
+    {
+        var documentation = new StringBuilder();
+        documentation.AppendLine("# Configuration Documentation");
+        documentation.AppendLine();
+
+        foreach (var (section, config) in _cache)
+        {
+            documentation.AppendLine($"## {section}");
+            documentation.AppendLine($"Schema Version: {GetConfigurationVersion(section)}");
+            documentation.AppendLine();
+
+            var type = config.GetType();
+            foreach (var prop in type.GetProperties())
+            {
+                documentation.AppendLine($"### {prop.Name}");
+                
+                var description = prop.GetCustomAttribute<DescriptionAttribute>()?.Description;
+                if (!string.IsNullOrEmpty(description))
+                {
+                    documentation.AppendLine(description);
+                }
+
+                var validationAttributes = prop.GetCustomAttributes().OfType<ValidationAttribute>();
+                if (validationAttributes.Any())
+                {
+                    documentation.AppendLine("\nValidation:");
+                    foreach (var attr in validationAttributes)
+                    {
+                        documentation.AppendLine($"- {attr.GetType().Name}: {attr.ErrorMessage}");
+                    }
+                }
+
+                documentation.AppendLine();
+            }
+        }
+
+        return documentation.ToString();
+    }
+
+    private void HandleConfigurationFileChange(object sender, FileSystemEventArgs e)
+    {
+        // Debounce rapid changes
+        Task.Delay(500).ContinueWith(async _ =>
+        {
+            try
+            {
+                _logger.LogInformation("Configuration file changed: {Path}", e.FullPath);
+                
+                // Clear cache for changed sections
+                var changedSections = await GetChangedSections(e.FullPath);
+                foreach (var section in changedSections)
+                {
+                    _cache.Remove(section);
+                    await NotifyConfigurationChanged(section);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error handling configuration file change");
+            }
+        });
+    }
+
+    private async Task<IEnumerable<string>> GetChangedSections(string path)
+    {
+        try
+        {
+            var previousConfig = _cache.Keys.ToList();
+            var newConfigJson = await File.ReadAllTextAsync(path);
+            var newConfig = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(newConfigJson, _jsonOptions);
+
+            return newConfig?.Keys.Where(k => !k.EndsWith("_SchemaVersion")) ?? Enumerable.Empty<string>();
+        }
+        catch
+        {
+            return Enumerable.Empty<string>();
+        }
+    }
+
+    private async Task NotifyConfigurationChanged(string section)
+    {
+        if (_changeCallbacks.TryGetValue(section, out var callbacks))
+        {
+            foreach (var callback in callbacks)
+            {
+                try
+                {
+                    var type = callback.GetType().GetGenericArguments()[0];
+                    var config = await GetConfiguration(type, section);
+                    callback.DynamicInvoke(config);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error notifying configuration change for section {Section}", section);
+                }
+            }
+        }
+    }
+
+    private void ApplyCommandLineOverrides<T>(T config) where T : class
+    {
+        var args = Environment.GetCommandLineArgs();
+        foreach (var prop in typeof(T).GetProperties())
+        {
+            var overrideAttr = prop.GetCustomAttribute<CommandLineOverrideAttribute>();
+            if (overrideAttr != null)
+            {
+                var argIndex = Array.FindIndex(args, a => a.Equals($"--{overrideAttr.ArgumentName}"));
+                if (argIndex >= 0 && argIndex < args.Length - 1)
+                {
+                    var value = args[argIndex + 1];
+                    var convertedValue = Convert.ChangeType(value, prop.PropertyType);
+                    prop.SetValue(config, convertedValue);
+                }
+                else if (overrideAttr.Required)
+                {
+                    throw new ConfigurationException($"Required command line argument '--{overrideAttr.ArgumentName}' not provided");
+                }
+            }
         }
     }
 
